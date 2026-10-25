@@ -339,7 +339,7 @@ export interface ExtractedTextTriggers {
  * adapter must then keep its legacy live-forward behavior: an unsigned relay
  * has no signature contract to violate.
  */
-export interface ParseStreamOpts {
+interface ParseStreamOpts {
     upstreamSignsThinking?: boolean;
 }
 
