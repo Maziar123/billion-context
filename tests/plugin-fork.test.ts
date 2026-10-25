@@ -760,21 +760,14 @@ test("HTTP fork revision and originals survive a new proxy process", { timeout: 
         parent.contentStore = storeOriginal(createContentStore(), { ref: "m00001", rawId: parent.pluginSnapshot![0].id, text: "CCR original retained independently after restart", kind: "original", tokens: 10, head: "CCR original" });
         parent.contentStoreDirty = true;
         assert(h.store.flushSync(parent));
-        // #4316 PR3/3: cold load runs the one-time ledger alignment — the loaded
-        // state now carries refLedgerAligned. Mirror it in the expectation.
-        // The alignment reads the unified sidecar, whose ingest of the just
-        // flushed records completes asynchronously (#4599) — bounded-wait for
-        // the flag so slow runners compare the aligned state, not the
-        // pre-ingest one.
-        let loadedParent: ReturnType<typeof h.store.loadSync> | undefined;
-        for (let i = 0; i < 100; i++) {
-            loadedParent = h.store.loadSync("parent") ?? undefined;
-            if ((loadedParent?.state as Record<string, unknown> | undefined)?.refLedgerAligned === true) break;
-            await new Promise((r) => setTimeout(r, 50));
-        }
+        // #4316 PR3/3: cold load runs the one-time ledger alignment, but only
+        // when the unified store is available — config-clean machines (CI) run
+        // legacy mode where the alignment is an honest skip and the loaded
+        // state never carries refLedgerAligned. Mirror the mode in the
+        // expectation instead of asserting the flag unconditionally.
         const persistedState = JSON.parse(JSON.stringify(parent.state));
-        persistedState.refLedgerAligned = true;
-        assert.deepEqual(JSON.parse(JSON.stringify((loadedParent ?? h.store.loadSync("parent"))!.state)), persistedState);
+        if (h.store.replicasAvailable()) persistedState.refLedgerAligned = true;
+        assert.deepEqual(JSON.parse(JSON.stringify(h.store.loadSync("parent")!.state)), persistedState);
         const snapshot = (await h.request("/__bili/plugin/snapshot?conversationId=parent")).body;
         const req = forkRequest(snapshot);
         const fork = await h.request("/__bili/plugin/fork", req);
