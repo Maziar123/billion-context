@@ -6,6 +6,7 @@ Versions follow the merge of a `*_release-v*` branch; CI publishes to npm on tag
 ## [Unreleased]
 
 ### Fixed
+- **round ≥2 的 thinking 块截断不再毒化客户端历史(自研重请求轮恢复可重取)**:代理工具(compress 等)执行后 bili 自己重发的那一轮(round ≥2)若在 thinking 块中途被上游截断,起始帧已下发而签名未到 → 客户端持久化一个无签名 thinking 块,#2501 的 `unsignedThinkingBarsRefetch` 因此拒绝两条重取路径,整轮以 `event: error` 结束;而 round 1 已把可见文本(如 `📦 [ACP] …` 回执)写进客户端流,客户端无法自己重放该请求——这一轮对客户端不可恢复。现在:上游被证据判定会签名(历史含签名 thinking,或本请求早期轮次已见签名;解析中一旦见到 `signature_delta` 即自行武装)时,bili 自有的 round ≥2 把 thinking 载荷缓冲在 wire 之外,`signature_delta` 到达才把起始帧 + 载荷 + 签名一次性放出;死在签名之前则不留任何客户端状态,#413 盲重取同一 round 照旧治愈整轮。从不签名的中转(GLM/DeepSeek anthropic 兼容端点)没有签名契约,仍实时转发,行为不变(#4679)。
 - 块区间边界在重存时不再回退:折叠后客户端重发的视图不含已覆盖原文,重入库时该批次无法重新解析区间(-1/-1),旧逻辑会把已解析的真实区间抹掉。现在区间证据一旦解析即持久(入库 `CASE` 保留;sqlite/mysql 双后端),未知块保持诚实缺口(#4608)。
 
 ### Added
