@@ -6,6 +6,7 @@ Versions follow the merge of a `*_release-v*` branch; CI publishes to npm on tag
 ## [Unreleased]
 
 ### Fixed
+- **子会话窗口继承(#4682)**:客户端给闲置复盘回合/子代理自造子会话 id(`<parent>:side:<id>`、`<parent>:side:conversation:<key>`、`<parent>:sub:<id>`),却只按父 uuid 上报 runtime-info;窗口阶梯按字面 id 查不到条目 → 落到注册表 peek,并因请求不带 tier 证据被 #1321 上限压到内置标准 200K。于是上报 1M 的会话把自己的复盘回合按 200K 预算:preflight 把 173K 上下文压向 150K 目标、提交早 SSE 头后客户端放弃,请求以 `not forwarding` 收场。现在精确条目缺失时按已知后缀逐级剥离(最多 4 层)取最近祖先条目,model 必须匹配(子会话换模型仍落空),直击条目永不被父条目覆盖;无新增配置键,阶梯顺序不变。
 - 块区间边界在重存时不再回退:折叠后客户端重发的视图不含已覆盖原文,重入库时该批次无法重新解析区间(-1/-1),旧逻辑会把已解析的真实区间抹掉。现在区间证据一旦解析即持久(入库 `CASE` 保留;sqlite/mysql 双后端),未知块保持诚实缺口(#4608)。
 
 ### Added
