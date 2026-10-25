@@ -1205,7 +1205,7 @@ def acp_command(raw_args: str = "", *, session_id: str = "") -> Optional[str]:
             return panel.strip()
         version = _fetch_version(origin)
         if version:
-            return (f"billion-context@{version} — proxy connected, compression armed. "
+            return (f"billion-context@{version} — proxy connected via {origin}, compression armed. "
                     "No model request yet; send one, then run /acp again.")
         return f"bili: proxy not reachable at {origin} — is the bili proxy still running?"
     except Exception as exc:
@@ -1230,7 +1230,7 @@ def acp_cache_command(raw_args: str = "", *, session_id: str = "") -> Optional[s
         if not isinstance(cid, str) or not cid:
             version = _fetch_version(origin)
             if version:
-                return (f"billion-context@{version} — proxy connected, compression armed. "
+                return (f"billion-context@{version} — proxy connected via {origin}, compression armed. "
                         "No model request yet; send one, then run /acp-cache again.")
             return f"bili: proxy not reachable at {origin} — is the bili proxy still running?"
         code, payload = http_post_json(

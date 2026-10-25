@@ -747,6 +747,14 @@ test("HTTP fork revision and originals survive a new proxy process", { timeout: 
     let child: ReturnType<typeof spawn> | undefined;
     try {
         await compress(h);
+        // CI-only race (#4599): the compress fold lands in the live session
+        // state asynchronously after the tool response (#3573 replay
+        // semantics). On slow runners flushSync below would otherwise persist
+        // the pre-fold state and the cold load reports "0 block(s)
+        // (compressions=0)". Bounded-wait for the fold first.
+        for (let i = 0; i < 100 && !(resolveConversation("parent").session?.state.blocks?.length ?? 0); i++) {
+            await new Promise((r) => setTimeout(r, 50));
+        }
         const parent = resolveConversation("parent").session!;
         parent.metadata.effectiveCcr = { ...DEFAULT_CCR_CONFIG, enabled: true };
         parent.contentStore = storeOriginal(createContentStore(), { ref: "m00001", rawId: parent.pluginSnapshot![0].id, text: "CCR original retained independently after restart", kind: "original", tokens: 10, head: "CCR original" });
@@ -754,9 +762,19 @@ test("HTTP fork revision and originals survive a new proxy process", { timeout: 
         assert(h.store.flushSync(parent));
         // #4316 PR3/3: cold load runs the one-time ledger alignment — the loaded
         // state now carries refLedgerAligned. Mirror it in the expectation.
+        // The alignment reads the unified sidecar, whose ingest of the just
+        // flushed records completes asynchronously (#4599) — bounded-wait for
+        // the flag so slow runners compare the aligned state, not the
+        // pre-ingest one.
+        let loadedParent: ReturnType<typeof h.store.loadSync> | undefined;
+        for (let i = 0; i < 100; i++) {
+            loadedParent = h.store.loadSync("parent") ?? undefined;
+            if ((loadedParent?.state as Record<string, unknown> | undefined)?.refLedgerAligned === true) break;
+            await new Promise((r) => setTimeout(r, 50));
+        }
         const persistedState = JSON.parse(JSON.stringify(parent.state));
         persistedState.refLedgerAligned = true;
-        assert.deepEqual(JSON.parse(JSON.stringify(h.store.loadSync("parent")!.state)), persistedState);
+        assert.deepEqual(JSON.parse(JSON.stringify((loadedParent ?? h.store.loadSync("parent"))!.state)), persistedState);
         const snapshot = (await h.request("/__bili/plugin/snapshot?conversationId=parent")).body;
         const req = forkRequest(snapshot);
         const fork = await h.request("/__bili/plugin/fork", req);

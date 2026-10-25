@@ -1610,6 +1610,30 @@ export class SessionStore {
             if (outcome.superseded.size > 0) {
                 session.restampSuperseded = outcome.superseded;
             }
+            // The token snapshot is keyed by ref (#3488 render-refs): renumbered
+            // refs would otherwise inherit the stale count of whichever message
+            // held the new number pre-alignment — the wire tag then disagrees
+            // with the legacy-restart leg beyond citation renumbering (storage
+            // engine-proofs wire-parity, #4599). Two-pass moves: stage all
+            // (oldRef → newRef → count) first, then delete, then write — a
+            // single-pass swap would lose entries whose newRef is another
+            // move's oldRef.
+            const snap = (state as { tokenSnapshot?: Record<string, number> }).tokenSnapshot;
+            if (snap && outcome.superseded.size > 0) {
+                const byRawNow = state.messageRefs.byRaw;
+                const moves: Array<[oldRef: string, newRef: string, count: number]> = [];
+                for (const [oldRef, rawId] of outcome.superseded) {
+                    const count = snap[oldRef];
+                    const newRef = byRawNow[rawId];
+                    if (count === undefined || newRef === undefined || newRef === oldRef) continue;
+                    moves.push([oldRef, newRef, count]);
+                }
+                if (moves.length > 0) {
+                    for (const [oldRef] of moves) delete snap[oldRef];
+                    for (const [, newRef, count] of moves) snap[newRef] = count;
+                    this.log("info", `[persist] remapped ${moves.length} token-snapshot entries onto ledger-aligned refs for ${session.id} (#4599)`);
+                }
+            }
             state.refLedgerAligned = true;
             this.log("info", `[persist] ledger-aligned refs for ${session.id}: kept=${outcome.kept} restamped=${outcome.restamped} rehomed=${outcome.rehomed} blocked=${outcome.blocked} superseded=${outcome.superseded.size} (#4316 PR3/3)`);
             this.scheduleSave(session);

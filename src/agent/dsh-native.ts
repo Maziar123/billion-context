@@ -1463,14 +1463,14 @@ async function statusOutcome(ctx: PluginContext, invocation?: CommandInvocation)
         const version = await fetchProxyVersion(base);
         return {
             kind: "success",
-            text: `${wireNote}billion-context${version ? `@${version}` : ""} — proxy connected, compression armed. Runtime info${typeof ri.source === "string" ? ` (${ri.source})` : ""}: ${parts.join(" ")}. No model request yet; send one, then run /acp again for the full panel.`,
+            text: `${wireNote}billion-context${version ? `@${version}` : ""} — proxy connected via ${base}, compression armed. Runtime info${typeof ri.source === "string" ? ` (${ri.source})` : ""}: ${parts.join(" ")}. No model request yet; send one, then run /acp again for the full panel.`,
         };
     }
     const version = await fetchProxyVersion(base);
     if (version) {
         return {
             kind: "success",
-            text: `${wireNote}billion-context@${version} — proxy connected, compression armed. No model request seen yet; send one, then run /acp again.`,
+            text: `${wireNote}billion-context@${version} — proxy connected via ${base}, compression armed. No model request seen yet; send one, then run /acp again.`,
         };
     }
     return {
@@ -1518,7 +1518,7 @@ async function cacheOutcome(ctx: PluginContext, invocation?: CommandInvocation):
             version = undefined;
         }
         if (version) {
-            return { kind: "success", text: `billion-context@${version} — proxy connected, compression armed. No model request seen yet; send one, then run /acp-cache again.` };
+            return { kind: "success", text: `billion-context@${version} — proxy connected via ${base}, compression armed. No model request seen yet; send one, then run /acp-cache again.` };
         }
         return {
             kind: "error",

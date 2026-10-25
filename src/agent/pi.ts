@@ -1137,7 +1137,7 @@ export function createBiliPlugin(agentOverride?: string, opts?: { retryIntervalM
                             version = undefined;
                         }
                         if (version !== undefined) {
-                            notify(armedIdleNotice(version), "info");
+                            notify(armedIdleNotice(version, proxyBase), "info");
                         } else {
                             notify(noSessionWarning(), "warning");
                         }

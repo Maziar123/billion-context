@@ -1019,6 +1019,7 @@ function changelogCatOf(rawLine) {
                 pb.appendChild(tr);
             });
             $("sys-version").textContent = d.version ? (d.commit ? d.version + " (" + d.commit + ")" : d.version) : "?";
+            $("sys-lane").textContent = d.origin || t("common.none");
             $("sys-disk-version").textContent = d.diskVersion || t("common.none");
             $("sys-inflight").textContent = String(d.inFlight || 0);
             const bt = d.blindTunnels || {};

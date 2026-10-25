@@ -57,6 +57,7 @@ export function renderPage(origin: string, version: string, embed = false, theme
 <div class="card" style="margin-top:16px"><div class="card-h"><span data-i18n="sys.title">${zh("sys.title")}</span></div><div class="card-b"><dl class="kv">
 <div class="k" data-i18n="sys.version">${zh("sys.version")}</div><div class="v mono" id="sys-version"></div>
 <div class="k" data-i18n="sys.disk_version">${zh("sys.disk_version")}</div><div class="v mono" id="sys-disk-version"></div>
+<div class="k" data-i18n="sys.lane">${zh("sys.lane")}</div><div class="v mono" id="sys-lane"></div>
 <div class="k" data-i18n="sys.inflight">${zh("sys.inflight")}</div><div class="v mono" id="sys-inflight">0</div>
 <div class="k" data-i18n="sys.blind_tunnels">${zh("sys.blind_tunnels")}</div><div class="v mono" id="sys-blind">0</div>
 </dl></div></div>

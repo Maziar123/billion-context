@@ -16,10 +16,11 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { once } from "node:events";
-import { canonicalize, sha256 } from "./golden-canonical.ts";
+import { canonicalize, sha256, sortObjectKeys } from "./golden-canonical.ts";
 import { defaultConfig } from "acp-kernel";
 import { startServer } from "../src/server.ts";
 import { SessionStore, _setStoreForTest } from "../src/persist.ts";
+import { stripOneTimeAlignment } from "./corrupt-index-child.ts";
 import { flushAllSessions, _resetSessionsForTest } from "../src/session.ts";
 import type { ProxyOptions } from "../src/config.ts";
 
@@ -110,7 +111,7 @@ const GROW_TURNS = 20; // hard cap for the grow loop
 const SUMMARY_MARKER = "[Compressed conversation section]";
 const EDIT_SENTINEL = "GOLDEN-EDIT-SENTINEL";
 
-interface GoldenTurn { i: number; sha: string; bytes: number }
+interface GoldenTurn { i: number; sha: string; bytes: number; shaCiteNorm: string }
 interface GoldenRecord {
     wire: Wire;
     turns: GoldenTurn[];
@@ -118,6 +119,7 @@ interface GoldenRecord {
     editedAt: number;      // body index after the mid-history edit
     summaryFrom: number;   // first body index carrying the fold summary
     stateDigest: string;   // sha256 of the canonicalized persisted session
+    stateDigestAligned: string; // #4316 PR3/3: same, modulo the one-time ledger alignment
     sectionDigests: Record<string, string>; // drift localization (same normalization)
     stateKeyDigests: Record<string, string>; // per-top-level-state-key digests
     stateShape: {          // human-readable facts baked into the snapshot
@@ -167,6 +169,18 @@ function canonicalBody(body: string): string {
         .replace(/msg-proxy-\d+(?:-\d+)?/g, "msg-proxy-<MINT>")
         .replace(/marker-\d+(?:-\d+)?/g, "marker-<MINT>")
         .replace(/msg-fix-[0-9a-f]+/g, "msg-fix-<MINT>");
+}
+
+// #4316 PR3/3 (380ef4dac): a full-mode cold load re-homes citation numbers
+// once (one-time ledger alignment) — that renumbering is the ONLY permitted
+// wire delta vs the legacy restart. Wire-parity proofs therefore pin a second
+// digest per turn with every citation number masked to <REF>: equality says
+// "only the citation numbers may differ", everything else stays byte-exact.
+// All m\d{5} tokens are masked (not just tag payloads) because summaries cite
+// numbers in prose too; user content is identical across legs, so the wider
+// mask cannot hide a real divergence.
+function citeNormBody(body: string): string {
+    return body.replace(/\bm\d{5}\b/g, "<REF>");
 }
 
 /** Timestamps (ms-epoch magnitude) and UUIDs become placeholders; everything
@@ -585,15 +599,7 @@ export async function driveWire(wire: Wire, sessionId = `golden-${wire}`, opts: 
         // order, so a harmless field-reorder commit (#3093) red all four
         // goldens. Deep-sort object keys harness-side only; array order is
         // preserved (foldAnchorOrder & co are ordered contracts).
-        const sortObjectKeys = (v: unknown): unknown => {
-            if (Array.isArray(v)) return v.map(sortObjectKeys);
-            if (v && typeof v === "object") {
-                const o: Record<string, unknown> = {};
-                for (const k of Object.keys(v as Record<string, unknown>).sort()) o[k] = sortObjectKeys((v as Record<string, unknown>)[k]);
-                return o;
-            }
-            return v;
-        };
+
         const lastView = JSON.stringify(canonicalize(sortObjectKeys({
             state: session.state,
             blockContents: [...session.blockContents.entries()],
@@ -606,6 +612,18 @@ export async function driveWire(wire: Wire, sessionId = `golden-${wire}`, opts: 
             .replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:<PORT>")
             .split(JSON.stringify(sessionId).slice(1, -1)).join("<SID>");
         const stateDigest = sha256(lastView);
+        // #4316 PR3/3: parallel digest modulo the one-time ledger alignment —
+        // cross-mode proofs compare states that may differ only in ref numbering.
+        const stateDigestAligned = sha256(
+            JSON.stringify(canonicalize(sortObjectKeys(stripOneTimeAlignment({
+                state: session.state,
+                blockContents: [...session.blockContents.entries()],
+                stats: session.stats,
+                metadata: session.metadata,
+            }))))
+                .replace(/127\.0\.0\.1:\d+/g, "127.0.0\.1:<PORT>")
+                .split(JSON.stringify(sessionId).slice(1, -1)).join("<SID>"),
+        );
         // Localization aid for cross-machine digest drift: per-section and
         // per-top-level-state-key digests under the SAME normalization, so a
         // CI failure message pinpoints the divergent subtree without needing
@@ -629,11 +647,15 @@ export async function driveWire(wire: Wire, sessionId = `golden-${wire}`, opts: 
         const active = st.blocks?.filter((b) => b.active) ?? [];
         return {
             wire,
-            turns: bodies.map((b, i) => ({ i, sha: sha256(canonicalBody(b)), bytes: Buffer.byteLength(b, "utf8") })),
+            turns: bodies.map((b, i) => {
+                const cb = canonicalBody(b);
+                return { i, sha: sha256(cb), bytes: Buffer.byteLength(b, "utf8"), shaCiteNorm: sha256(canonicalBody(citeNormBody(b))) };
+            }),
             foldAt,
             editedAt,
             summaryFrom: bodies.findIndex((b) => b.includes(SUMMARY_MARKER)),
             stateDigest,
+            stateDigestAligned,
             sectionDigests,
             stateKeyDigests,
             stateShape: {

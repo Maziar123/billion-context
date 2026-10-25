@@ -322,8 +322,20 @@ test("nativeAttachOrigin: normalizes a valid http(s) origin (trailing slash stri
     assert.equal(nativeAttachOrigin({ BILLION_CONTEXT_ATTACH: "  https://proxy.example.com/ " }), "https://proxy.example.com");
 });
 
-test("planNativeOpencode: default is spawn; opt-out and /bili/ launches are off", () => {
-    assert.deepEqual(planNativeOpencode({}), { mode: "spawn" });
+test("planNativeOpencode: default is inline; opt-out and /bili/ launches are off", () => {
+    // #3278 port: the opencode lane defaults to in-process compression (same
+    // flip as the pi lane) — spawn only survives as an explicit opt-out.
+    assert.deepEqual(planNativeOpencode({}), { mode: "spawn" }, "default stays spawn (no default flip — owner decision on #4687)");
+    assert.deepEqual(planNativeOpencode({}, false), { mode: "spawn" });
+    assert.deepEqual(planNativeOpencode({}, true), { mode: "inline" });
+    assert.deepEqual(planNativeOpencode({ BILI_OPENCODE_INLINE: "1" }, false), { mode: "inline" });
+    assert.deepEqual(planNativeOpencode({ BILI_OPENCODE_INLINE: "yes" }), { mode: "inline" });
+    for (const off of ["", "0", "false", "no", "off"]) {
+        assert.deepEqual(planNativeOpencode({ BILI_OPENCODE_INLINE: off }, true), { mode: "spawn" }, `BILI_OPENCODE_INLINE=${JSON.stringify(off)}`);
+    }
+    // a garbage env value is a PRESENCE choice for inline (never silently off)
+    assert.deepEqual(planNativeOpencode({ BILI_OPENCODE_INLINE: "garbage" }), { mode: "inline" });
+    assert.deepEqual(planNativeOpencode({ BILI_OPENCODE_INLINE: "0" }), { mode: "spawn" }, "explicit off without attach target ⇒ spawn");
     assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PLUGIN: "0" }), { mode: "off" });
     assert.deepEqual(planNativeOpencode({ BILI_NATIVE_OPENCODE: "0" }), { mode: "off" });
     assert.deepEqual(planNativeOpencode({ BILI_PROVIDER_REWRITES: '{"vllm":"http://127.0.0.1:1/bili/http://x"}' }), { mode: "off" });
@@ -341,9 +353,15 @@ test("planNativeOpencode: a preset BILLION_CONTEXT_PROXY is an attach target, no
     // kill switches and a /bili/ launch still win over the preset
     assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "http://127.0.0.1:36485", BILLION_CONTEXT_PLUGIN: "0" }), { mode: "off" });
     assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "http://127.0.0.1:36485", BILI_PROVIDER_REWRITES: "{}" }), { mode: "off" });
-    // a garbage preset falls back to spawn (self-managed) rather than dead-off
+    // an announced attach target beats the DEFAULT inline, but an explicit
+    // inline choice (env or file) always wins over attach
+    assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "http://127.0.0.1:36485", BILI_OPENCODE_INLINE: "1" }), { mode: "inline" });
+    assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "http://127.0.0.1:36485" }, true), { mode: "inline" });
+    assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "http://127.0.0.1:36485", BILI_OPENCODE_INLINE: "0" }), { mode: "attach", attachOrigin: "http://127.0.0.1:36485" }, "inline opted out + announced target ⇒ attach");
+    // a garbage preset falls back to self-management — inline by default now —
+    // rather than dead-off
     assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "garbage" }), { mode: "spawn" });
-    assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "  " }), { mode: "spawn" });
+    assert.deepEqual(planNativeOpencode({ BILLION_CONTEXT_PROXY: "  " }, false), { mode: "spawn" });
 });
 
 test("planNativeOpencode: attach wins over spawn when no launcher owns the proxy", () => {
@@ -935,5 +953,122 @@ test("#3501 wiring: late routed evidence from an admin-gated origin does not reb
         delete process.env.BILLION_CONTEXT_PROXY;
         _setSpawnForTest(undefined);
         _resetNativeStateForTest();
+    }
+});
+
+test("#4669 inline arm: state freezes INLINE_ORIGIN and pins the env without spawning anything", async () => {
+    const ie = await import("../src/inline-engine.ts");
+    ie._setEngineFactoryForTest(async () => { throw new Error("the inline arm must not boot the engine from inside a test"); });
+    try {
+        _resetNativeStateForTest();
+        delete process.env.BILLION_CONTEXT_PROXY;
+        armNativeOpencode({ mode: "inline" });
+        // The pseudo-origin is published SYNCHRONOUSLY — V2's route and V1's
+        // server() resolve it without waiting on a port that does not exist.
+        assert.equal(process.env.BILLION_CONTEXT_PROXY, ie.INLINE_ORIGIN);
+        assert.equal(typeof _stateRespawnForTest(), "function", "inline mode exposes the engine-boot respawn seam");
+        // NODE_TEST_CONTEXT keeps state.ready lazy — the factory above must
+        // never have been called (proved by the throw-on-call factory).
+        await sleep(50);
+    } finally {
+        delete process.env.BILLION_CONTEXT_PROXY;
+        _resetNativeStateForTest();
+        ie._setEngineFactoryForTest(undefined);
+        ie._resetInlineEngineForTest();
+    }
+});
+
+test("#4669 composition: opencode inline chain — rewrites land on the inline engine, never on real DNS", async () => {
+    // The production arm (opencode-native.ts module load) installs the inline
+    // transport FIRST, then the native fetch intercept ON TOP — the same stack
+    // shape as the pi lane (#4527). The intercept rewrites model URLs to
+    // `${INLINE_ORIGIN}/bili/<upstream>` and hands them DOWN; the inline link
+    // must serve them in-process instead of letting the pseudo-origin hit
+    // real DNS (ENOTFOUND billion-context.inline).
+    const ie = await import("../src/inline-engine.ts");
+    const ni = await import("../src/agent/native-intercept.ts");
+    const fc = await import("../src/agent/fetch-chain/index.ts");
+    const piInline = await import("../src/agent/pi-inline.ts");
+    const calls: string[] = [];
+    ie._setEngineFactoryForTest(async () => ({
+        origin: ie.INLINE_ORIGIN,
+        dispatch: async (input: string | URL | Request): Promise<Response> => {
+            calls.push(String(input));
+            return new Response("inline-ok");
+        },
+        dispatchHttp: async () => {},
+        wsOrigin: Promise.resolve(undefined),
+        webOrigin: Promise.resolve(undefined),
+    }));
+    try {
+        ni._resetForTest();
+        fc.resetFetchChainForTest();
+        piInline._resetInlineTransportForTest();
+        piInline.installInlineTransport();
+        const state: NativeInterceptState = { origin: ie.INLINE_ORIGIN, ready: Promise.resolve(ie.INLINE_ORIGIN) };
+        assert.equal(ni.installNativeFetchIntercept(state), true);
+        // A PLAIN model URL — what the opencode host SDK actually calls.
+        const r = await fetch(MODEL_URL, { method: "POST", body: "{}" });
+        assert.equal(r.status, 200);
+        assert.equal(await r.text(), "inline-ok");
+        assert.deepEqual(calls, [`${ie.INLINE_ORIGIN}/bili/${MODEL_URL}`]);
+        // Management URLs take the intercept's control-passthrough branch and
+        // must land on the inline engine too (the manifest/status fetches).
+        const m = await fetch(`${ie.INLINE_ORIGIN}/__bili/health`);
+        assert.equal(m.status, 200);
+        assert.deepEqual(calls, [`${ie.INLINE_ORIGIN}/bili/${MODEL_URL}`, `${ie.INLINE_ORIGIN}/__bili/health`]);
+    } finally {
+        piInline._resetInlineTransportForTest();
+        fc.resetFetchChainForTest();
+        ni._resetForTest();
+        ie._setEngineFactoryForTest(undefined);
+        ie._resetInlineEngineForTest();
+    }
+});
+
+test("#4669 V2 composition: route rewrite + fetch chain serves INLINE_ORIGIN in-process", async () => {
+    // OpenCode 2.x production shape: the http.request route hook REPLACES the
+    // outgoing Request's target with `${INLINE_ORIGIN}/bili/<url>`, then the
+    // host's own fetch (patched by our chain) sends it. Route rewrite must
+    // compose with the inline link exactly like the intercept's own rewrite.
+    const ie = await import("../src/inline-engine.ts");
+    const ni = await import("../src/agent/native-intercept.ts");
+    const fc = await import("../src/agent/fetch-chain/index.ts");
+    const piInline = await import("../src/agent/pi-inline.ts");
+    const calls: string[] = [];
+    ie._setEngineFactoryForTest(async () => ({
+        origin: ie.INLINE_ORIGIN,
+        dispatch: async (input: string | URL | Request): Promise<Response> => {
+            calls.push(input instanceof Request ? input.url : String(input));
+            return new Response("inline-ok");
+        },
+        dispatchHttp: async () => {},
+        wsOrigin: Promise.resolve(undefined),
+        webOrigin: Promise.resolve(undefined),
+    }));
+    try {
+        ni._resetForTest();
+        fc.resetFetchChainForTest();
+        piInline._resetInlineTransportForTest();
+        piInline.installInlineTransport();
+        const state: NativeInterceptState = { origin: ie.INLINE_ORIGIN, ready: Promise.resolve(ie.INLINE_ORIGIN) };
+        const route = createNativeRoute(state, { probe: async () => true });
+        const e: V2HttpRequestEvent = {
+            sessionID: "ses_inline",
+            request: new Request(MODEL_URL, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }),
+        };
+        await route(e, {});
+        assert.equal((e.request as Request).url, `${ie.INLINE_ORIGIN}/bili/${MODEL_URL}`, "route rewrites to the pseudo-origin");
+        // The host then sends the rewritten Request through global fetch.
+        const r = await fetch(e.request as Request);
+        assert.equal(r.status, 200);
+        assert.equal(await r.text(), "inline-ok");
+        assert.deepEqual(calls, [`${ie.INLINE_ORIGIN}/bili/${MODEL_URL}`]);
+    } finally {
+        piInline._resetInlineTransportForTest();
+        fc.resetFetchChainForTest();
+        ni._resetForTest();
+        ie._setEngineFactoryForTest(undefined);
+        ie._resetInlineEngineForTest();
     }
 });
