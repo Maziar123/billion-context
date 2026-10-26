@@ -144,6 +144,18 @@ test("a root without content degrades to an empty list instead of throwing", () 
     assert.deepEqual(getBlogFeed(), { items: [] });
 });
 
+test("CRLF frontmatter (Windows autocrlf checkout) still yields title/excerpt/date", () => {
+    const posts = join(pkgRoot, "website", "blog", "posts");
+    writeFileSync(join(posts, "2026-10-08_crlf.md"), "---\r\ntitle: \"CRLF post\"\r\nexcerpt: \"EN excerpt.\"\r\n---\r\n\r\n## Body\r\n\r\nText.\r\n");
+    _setBlogRootForTest(pkgRoot);
+    const data = getBlogFeed();
+    const crlf = data.items.find((i) => i.id === "crlf");
+    assert.ok(crlf, "crlf post listed");
+    assert.equal(crlf.title, "CRLF post");
+    assert.equal(crlf.excerpt, "EN excerpt.");
+    assert.equal(crlf.date, "2026-10-08");
+});
+
 test("default probing finds the repository tree from the TS source layout", () => {
     _setBlogRootForTest(null);
     const data = getBlogFeed();

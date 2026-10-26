@@ -163,7 +163,7 @@ import { conflictRemediation } from "./conflict-watch.js";
 import { conflictScanEnabled, isDesignBenign, scanClientPlugins } from "./thirdparty-scan.js";
 
 export const LAUNCHER_DEFAULT_HOST = "127.0.0.1";
-export const LAUNCH_CLIENTS = ["pi", "codex", "claude", "omp", "opencode", "hermes", "dsh", "codebuddy", "qoder", "trae", "jcode", "kimi", "gemini", "iflow", "qwen", "mcode", "aider", "copilot", "amp", "crush", "zed", "goose", "antigravity", "pi-test", "pi-inline"] as const;
+export const LAUNCH_CLIENTS = ["pi", "codex", "claude", "omp", "opencode", "hermes", "dsh", "codebuddy", "qoder", "trae", "jcode", "kimi", "gemini", "iflow", "qwen", "mcode", "aider", "copilot", "amp", "crush", "zed", "goose", "antigravity", "pi-test", "pi-inline", "opencode-inline"] as const;
 export type ClientName = (typeof LAUNCH_CLIENTS)[number];
 type BaseClientName = "claude" | "codex" | "pi" | "omp" | "opencode" | "hermes" | "dsh" | "codebuddy" | "qoder" | "trae" | "jcode" | "kimi" | "gemini" | "iflow" | "qwen" | "mcode" | "aider" | "copilot" | "amp" | "crush" | "zed" | "goose" | "antigravity";
 
@@ -333,7 +333,7 @@ export function isLaunchClient(value: string): value is ClientName {
 }
 
 export function baseClientName(client: ClientName): BaseClientName {
-    return client === "pi-test" || client === "pi-inline" ? "pi" : client;
+    return client === "pi-test" || client === "pi-inline" ? "pi" : client === "opencode-inline" ? "opencode" : client;
 }
 
 /** `pi-test` injects `--no-extensions` so the billion-context-pi client extension doesn't double-compress alongside the proxy. */
@@ -5418,7 +5418,12 @@ export function planClientSpawn(
             "Set BILI_CLIENT_BIN to the native executable (e.g. the real codex.exe) or to a script entry run under node, or reword the argument.",
         );
     });
-    const comspec = nonEmpty(env.COMSPEC) ? env.COMSPEC : "cmd.exe";
+    // #4599: Windows env vars are case-insensitive, but sanitized copies
+    // (spread objects, e.g. stripInheritedProxy's inlineEnv) keep the original
+    // key casing — `ComSpec` — where an exact `env.COMSPEC` probe misses it
+    // and silently degrades to the bare-name fallback. Probe every spelling.
+    const comspecRaw = env.COMSPEC ?? env.ComSpec ?? env.comspec;
+    const comspec = nonEmpty(comspecRaw) ? comspecRaw : "cmd.exe";
     return {
         command: comspec,
         args: ["/d", "/s", "/c", buildWindowsCommandLine(cmd, args)],
@@ -5816,6 +5821,49 @@ export async function runLaunch(params: RunLaunchParams, deps: LauncherDeps = {}
             });
         } catch (err) {
             console.error(`bili: failed to launch pi-inline: ${err instanceof Error ? err.message : String(err)}`);
+            inlineCode = 1;
+        }
+        process.exit(inlineCode ?? 0);
+        return;
+    }
+    // `bili opencode-inline` (#4669): launch opencode on the IN-PROCESS engine
+    // — no proxy is spawned at all. BILI_OPENCODE_INLINE outranks ambient
+    // attach envs in planNativeOpencode, so the child's plugin arms inline
+    // mode by itself. The plugin entry rides the SAME OPENCODE_CONFIG clone
+    // the proxy lane uses (plugin injection only — no baseURL rewrites: the
+    // inline intercept catches bare model URLs), so opencode 2.x gets its
+    // required directory wrapper and a missing dist entry fails loud instead
+    // of silently running uncompressed.
+    if (params.client === "opencode-inline") {
+        const ocPlugin = selfDistFile("agent/opencode-native.js");
+        if (ocPlugin === undefined || !fs.existsSync(ocPlugin)) {
+            console.error("bili: opencode-inline needs the bili opencode plugin entry (dist/agent/opencode-native.js missing) — reinstall billion-context.");
+            process.exit(2);
+            return;
+        }
+        // Clean slate for the child: a stale inherited BILLION_CONTEXT_PROXY
+        // would make planNativeOpencode ATTACH instead of arming the
+        // in-process engine, and inherited proxy/MITM env has nothing to do
+        // inline (no TLS is terminated in this lane).
+        const inlineEnv = stripInheritedProxy(process.env);
+        delete inlineEnv.BILLION_CONTEXT_PROXY;
+        delete inlineEnv.BILI_MITM_HOSTS;
+        inlineEnv.BILI_OPENCODE_INLINE = "1";
+        // Plugin injection only: empty rewrite lists mean `origin` is unused;
+        // dir mode mirrors the proxy lane for OpenCode 2.x.
+        const dirMode = opencodeMajorVersion(resolveClientCommand("opencode", process.env).command) >= 2;
+        const ocTmp = prepareOpencodeHttpRewrite(readOpencodeConfigRoot(process.env), "", [], [], ocPlugin, dirMode, inlineEnv);
+        if (ocTmp) inlineEnv.OPENCODE_CONFIG = ocTmp;
+        console.error("bili: opencode-inline — compression runs inside opencode (in-process engine); no proxy is started.");
+        const { command, prefixArgs } = resolveClientCommand("opencode", process.env, deps.platform ?? process.platform);
+        let inlineCode = 0;
+        try {
+            inlineCode = await runClient(command, [...prefixArgs, ...params.clientArgs], inlineEnv, {
+                spawnImpl: deps.spawnImpl,
+                platform: deps.platform,
+            });
+        } catch (err) {
+            console.error(`bili: failed to launch opencode-inline: ${err instanceof Error ? err.message : String(err)}`);
             inlineCode = 1;
         }
         process.exit(inlineCode ?? 0);

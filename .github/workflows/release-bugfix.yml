@@ -1,93 +1,46 @@
-name: Bugfix Release (gate-branch model)
+name: Bugfix Release (carve-out)
 
-# Patch-lane release channel, v3 model (2026-10-25, owner decision; supersedes
-# the v2 "any merge INTO a lane publishes" trigger and the backport-ship label
-# path from #4596 — both decommissioned).
+# Dedicated emergency / hotfix publish channel (#2011), PR-gated since #2851.
 #
-# THREE BRANCHES, ONE ROLE EACH:
-#   bugfix            THE GATE. A standalone PROTECTED branch with the same
-#                     status as master (PR-only, required checks, no
-#                     force/delete). It never accumulates development; it only
-#                     RECEIVES a finished tag lane.
-#   bugfix-vX.Y.Z     THE TAG LANES. Each cycle's lane is cut from the released
-#                     vX.Y.Z tag (first lane manually; every later lane
-#                     AUTO-CUT by this workflow, stage P4 below) and carries
-#                     package.json pre-bumped to the next version. All fixes
-#                     enter a lane through reviewed carry PRs (backport.yml
-#                     auto-opens them from the `backport` label); those
-#                     merges NEVER publish.
-#   master            MAINLINE. Re-aligned after every publish via the
-#                     auto-opened alignment PR (stage P3).
+# Publishes a version cut from a NON-master ref -- e.g. a released tag plus a
+# single fix -- STRICTLY excluding the unreleased work that has since
+# accumulated on master. First used for the v0.1.182 emergency: ship ONLY the
+# integer max_tokens fix without dragging in the ~70 commits already merged to
+# master after v0.1.181.
 #
-# THE FIRE IS ONE EXACT PR SHAPE AND NOTHING ELSE:
-#   a SAME-REPO PR, MERGED, base = `bugfix`, head = `bugfix-vX.Y.Z`.
-#   That merge publishes the POST-MERGE lane head (= the merge sha) through
-#   the full guard chain. Every other close — any PR into a lane, any
-#   non-tag-branch into `bugfix`, a non-merged close, a fork — is a
-#   millisecond no-op. Merging carries into a lane therefore NEVER ships a
-#   version; only the explicit lane -> bugfix ship PR does.
+# Unlike release.yml (which builds the POST-MERGE MASTER tree on push-to-master,
+# so it can never exclude master's existing commits), this checks out and
+# publishes the CARVE-OUT PR HEAD tree itself -- the artifact is exactly that
+# tree, nothing else.
 #
-# CYCLE (v3):
-#   P1 carry PRs (reviewed, full checks) land in bugfix-vX.Y.Z       [silent]
-#   P2 ship PR bugfix-vX.Y.Z -> bugfix is MERGED                     [PUBLISH:
-#        post-merge lane head -> version guards -> full CI dispatch+wait
-#        at the publish sha -> npm/typecheck/test/build -> tag -> npm
-#        publish -> GH Release; audit comment left on the ship PR]
-#   P3 right after a successful publish this workflow AUTO-OPENS the
-#      alignment PR (head=`bugfix` -> master; title contract below). The owner
-#      merges it (structural conflicts expected; master-first resolution).
-#   P4 the merge of THAT alignment PR fires this workflow again (second path
-#      below): it AUTO-CUTS the next lane bugfix-vX.Y.Z from tag vX.Y.Z
-#      (pre-bumped +1 patch) so the following cycle starts with zero manual
-#      steps. Only the very first lane (bugfix-v0.1.206) was cut manually.
+# GATE MODEL (#2851): the carve-out branch is opened as a PR against master and
+# publishes ONLY when that PR is MERGED -- the same human review gate as every
+# normal release. Pushing a bugfix-release/** branch triggers NOTHING (the old
+# silent-push auto-publish was removed). The head branch keeps the
+# bugfix-release/ prefix as the carve-out MARKER: release.yml's detection
+# deliberately does not match it, so merging the PR cannot double-publish the
+# post-merge master through the normal channel.
 #
-# ALIGNMENT PR TITLE CONTRACT (load-bearing for P4):
-#   "align master with vX.Y.Z (shipped from <lane>)"
-#   Renaming this format silently breaks the auto-cut; documented in
-#   reference/release.md.
-#
-# Emergency escape hatch: workflow_dispatch with `fast=true` (owner picks the
-# ref in the UI): skips the full-CI dispatch/gate and the full npm test, keeps
-# every version guard + npm ci + typecheck + build. Owner-owned risk.
-#
-# LEGACY path (kept dormant, unchanged): the original `pull_request` closed
-# trigger for bugfix-release/* one-off carve-outs PR'd AGAINST MASTER predates
-# the lane model. It still works so an old in-flight carve-out can finish
-# safely; new work must go through the gate-branch flow.
+# NOTE 2026-10-25: the workflow_dispatch trigger was REMOVED after a concurrent
+# agent session abused manual dispatch to publish v0.1.208 outside the intended
+# flow (see #4718). The ONLY ignition shape left is a HUMAN merging the
+# carve-out PR below.
 #
 # Guarded so it can never:
-#   - move `latest` backwards (target strictly newer than npm latest);
+#   - move `latest` backwards (target must be strictly newer than npm latest);
 #   - re-publish an already-live version;
 #   - ship a sub-0.1.0 line (#1385);
-#   - act on fork PRs (secrets unavailable) or non-merged closes;
-#   - publish anything but the reviewed post-merge lane head;
-#   - fire on ANY other merge shape (see THE FIRE above).
+#   - publish a stable version with no release-notes entry (#1870);
+#   - act on fork PRs (secrets unavailable) or on non-merged closes.
 #
-# Master interaction: the post-publish alignment PR brings the shipped lane
-# content (and the version bump) INTO master. Master's next normal release
-# MUST be higher than the shipped version -- the one-click bump derives from
-# npm latest, so this holds automatically.
+# Master interaction: merging the carve-out PR brings the version bump INTO
+# master (master then equals npm latest). Master advances independently on its
+# next normal release, which MUST be higher than the carve-out version.
 
 on:
   pull_request:
     types: [closed]
     branches: [master]
-  pull_request_target:
-    # v3 dual path (resolve step sorts it out):
-    #   A) base=`bugfix`, head=`bugfix-vX.Y.Z`, merged => PUBLISH
-    #   B) base=`master`, head=`bugfix`, merged, alignment title => AUTO-CUT
-    # Runs the BASE-side copy of this workflow with secrets; the resolve step
-    # rejects fork PRs before any head content is touched and no-ops within
-    # milliseconds on every close that is not one of the two shapes.
-    types: [closed]
-    branches: [bugfix, master]
-  workflow_dispatch:
-    inputs:
-      fast:
-        description: "EMERGENCY fast publish: skip the full-CI dispatch/gate and the full npm test. Keeps every version guard + npm ci + typecheck + build. Owner-owned risk (opened 2026-10-17 to unblock v0.1.199 when CI flakes stall the normal channel)."
-        type: boolean
-        default: false
-
 concurrency:
   group: bugfix-release
   cancel-in-progress: false
@@ -99,31 +52,23 @@ jobs:
       contents: write
       id-token: write
       actions: write
-      pull-requests: write  # annotate the ship PR + auto-open the alignment PR + announce auto-cuts
     steps:
-      - name: Validate trigger + resolve the path (publish | cut | noop)
+      - name: Validate trigger + resolve the publish ref
         id: resolve
         run: |
-          PATH=noop
-          BRANCH=""
-          SHA=""
-          VER=""
-          HEADSHA=""
-          TITLE="$(jq -r '.pull_request.title // ""' "$GITHUB_EVENT_PATH")"
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
-            # LEGACY one-off carve-out: PR against master whose head is the
-            # carve-out branch. Publishes the PRE-MERGE head on merge.
             MERGED="$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")"
-            HEADREF="$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")"
+            BRANCH="$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")"
             SAME_REPO="$(jq -r '(.pull_request.base.repo.full_name == .pull_request.head.repo.full_name)' "$GITHUB_EVENT_PATH")"
+            SHA="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
             if [ "$MERGED" != "true" ]; then
               echo "::notice::PR $GITHUB_EVENT_NUMBER closed without merging — nothing to publish"
               exit 0
             fi
-            case "$HEADREF" in
-              bugfix-release/*) ;; # legacy one-off carve-out
+            case "$BRANCH" in
+              bugfix-release/*) ;;
               *)
-                echo "::notice::head branch '$HEADREF' is not a legacy bugfix-release/* carve-out — nothing to publish"
+                echo "::notice::head branch '$BRANCH' is not a bugfix-release/* carve-out branch — nothing to publish"
                 exit 0
                 ;;
             esac
@@ -131,159 +76,36 @@ jobs:
               echo "::error::fork PRs cannot use the carve-out channel (repo secrets are unavailable for them)"
               exit 1
             fi
-            PATH=publish
-            BRANCH="$HEADREF"
-            SHA="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
-            HEADSHA="$SHA"
-          elif [ "$GITHUB_EVENT_NAME" = "pull_request_target" ]; then
-            MERGED="$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")"
-            STATE="$(jq -r '.pull_request.state' "$GITHUB_EVENT_PATH")"
-            BASE="$(jq -r '.pull_request.base.ref' "$GITHUB_EVENT_PATH")"
-            HEADREF="$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")"
-            SAME_REPO="$(jq -r '(.pull_request.base.repo.full_name == .pull_request.head.repo.full_name)' "$GITHUB_EVENT_PATH")"
-            if [ "$STATE" != "closed" ] || [ "$MERGED" != "true" ]; then
-              echo "::notice::PR $GITHUB_EVENT_NUMBER is '$STATE' (merged=$MERGED) — only MERGED same-repo PRs act"
-              exit 0
-            fi
-            # ---- path A: the ship shape — a TAG LANE merged into `bugfix` ----
-            if [ "$BASE" = "bugfix" ]; then
-              case "$HEADREF" in
-                bugfix-v[0-9]*.[0-9]*.[0-9]*) ;;
-                *)
-                  echo "::notice::'$HEADREF' -> bugfix is not a tag lane (bugfix-vX.Y.Z) — NOT a ship PR; nothing to publish"
-                  exit 0
-                  ;;
-              esac
-              if [ "$SAME_REPO" != "true" ]; then
-                echo "::error::fork PRs cannot use the gate-branch publish channel (repo secrets are unavailable for them)"
-                exit 1
-              fi
-              PATH=publish
-              BRANCH="$HEADREF"
-              SHA="$(jq -r '.pull_request.merge_commit_sha' "$GITHUB_EVENT_PATH")"
-              HEADSHA="$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")"
-              echo "::notice::SHIP PR detected: $HEADREF -> bugfix @ ${SHA:0:12} — publishing the post-merge lane head"
-            # ---- path B: the alignment landed — auto-cut the next lane ----
-            elif [ "$BASE" = "master" ] && [ "$HEADREF" = "bugfix" ]; then
-              if [ "$SAME_REPO" != "true" ]; then
-                echo "::error::fork PRs cannot drive the auto-cut (repo secrets are unavailable for them)"
-                exit 1
-              fi
-              case "$TITLE" in
-                "align master with v"*)
-                  REST="${TITLE#align master with v}"
-                  VER="${REST%% *}"
-                  if ! printf '%s' "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-                    echo "::error::alignment title does not follow the contract 'align master with vX.Y.Z (...)' (parsed version '$VER') — auto-cut refused"
-                    exit 1
-                  fi
-                  PATH=cut
-                  echo "::notice::alignment PR '$TITLE' merged — auto-cutting lane bugfix-v$VER from tag v$VER"
-                  ;;
-                *)
-                  echo "::notice::bugfix -> master merge without the alignment title contract ('$TITLE') — nothing to cut"
-                  exit 0
-                  ;;
-              esac
-            else
-              echo "::notice::base '$BASE' / head '$HEADREF' matches neither ship nor alignment shape — nothing to do"
-              exit 0
-            fi
           else
-            # workflow_dispatch: EMERGENCY fast publish of the selected ref
-            PATH=publish
             BRANCH="$GITHUB_REF_NAME"
             SHA=""
           fi
-          [ "$PATH" = "noop" ] && { echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0; }
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
-          echo "path=$PATH" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "headsha=$HEADSHA" >> "$GITHUB_OUTPUT"
-          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - name: Checkout
         if: steps.resolve.outputs.proceed == 'true'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Auto-cut the next tag lane (path B — after the alignment merge)
-        # v3 stage P4: the alignment PR (bugfix -> master) just merged. Cut
-        # bugfix-vX.Y.Z from tag vX.Y.Z, pre-bump package.json to the next
-        # patch version, push. Idempotent: an existing branch is a no-op.
-        # NOTE: GITHUB_TOKEN cannot apply branch protection — the announcement
-        # comment tells the owner the one remaining manual click (Settings ->
-        # Branches, or the PUT JSON in reference/release.md).
-        if: steps.resolve.outputs.path == 'cut'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -uo pipefail
-          VER="${{ steps.resolve.outputs.ver }}"
-          NEW_LANE="bugfix-v$VER"
-          MANUAL_CMDS='git fetch origin tag v'"$VER"' --no-tags && git checkout -b '"$NEW_LANE"' v'"$VER" && (edit package.json version to the next patch) && git commit -am "release: cut $NEW_LANE from v$VER" && git push origin "$NEW_LANE"
-          fail() {
-            echo "::error::$1"
-            gh pr comment "$GITHUB_EVENT_NUMBER" --body "❌ **Auto-cut failed**: $1\n\nManual recovery:\n\`\`\`bash\n$MANUAL_CMDS\n\`\`\`\nThen protect \`$NEW_LANE\` exactly like master (reference/release.md § Lane protection)." \
-              || echo "::warning::could not annotate PR $GITHUB_EVENT_NUMBER"
-            exit 1
-          }
-          git fetch origin "refs/tags/v$VER" --no-tags || fail "tag v$VER not found on origin — the alignment was merged before the publish tag existed?"
-          git rev-parse --verify --quiet "v$VER^{commit}" >/dev/null || fail "tag v$VER present but unresolvable"
-          LIVE="$(git ls-remote origin "refs/heads/$NEW_LANE" | awk '{print $1}')"
-          if [ -n "$LIVE" ]; then
-            echo "::notice::$NEW_LANE already exists on origin ($LIVE) — idempotent no-op"
-            exit 0
-          fi
-          NEXT="$(node -p "(function(){const v=process.argv[1].split('.');return v[0]+'.'+v[1]+'.'+(Number(v[2])+1)})" "$VER")"
-          git checkout -b "$NEW_LANE" "v$VER"
-          sed -i "s/\"version\": \"$VER\"/\"version\": \"$NEXT\"/" package.json
-          node -e "if(require('./package.json').version!=='$NEXT'){console.error('::error::pre-bump failed');process.exit(1)}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -q -m "release: auto-cut patch lane $NEW_LANE from v$VER; pre-bump package.json to $NEXT (v3 stage P4)"
-          git push -q origin "$NEW_LANE" || fail "push of $NEW_LANE rejected"
-          SHA="$(git rev-parse HEAD)"
-          gh pr comment "$GITHUB_EVENT_NUMBER" --body "✅ **Stage P4 complete** — lane \`$NEW_LANE\` auto-cut from tag \`v$VER\` (@ ${SHA:0:12}), package.json pre-bumped to \`$NEXT\`. One manual step remains before it takes on carries: apply the same protection as master (Settings → Branches → \`$NEW_LANE\`; payload: reference/release.md § Lane protection). Carry PRs (backport label) can start immediately." \
-            || echo "::warning::could not annotate PR $GITHUB_EVENT_NUMBER (non-fatal)"
-          echo "::notice::lane cycle advanced: next lane $NEW_LANE ready (unprotected until the owner clicks)"
-
-      - name: Switch to the publish tree (post-merge lane head / legacy pre-merge head)
-        # v3 path A: publish the EXACT reviewed state — the merge sha of the
-        # ship PR that just landed in `bugfix`. Legacy: pre-merge head of a
-        # merged carve-out PR. If the LANE head has moved past the reviewed
-        # ship state (another carry landed while this run queued behind the
-        # ship PR under the concurrency group), warn loudly and still publish
-        # the reviewed sha; content past a SHIPPED lane never rides another
-        # release of that lane (the monotonic guard freezes it) — move it
-        # forward to master and carry it into the NEXT lane.
-        if: steps.resolve.outputs.path == 'publish' && steps.resolve.outputs.sha != ''
+      - name: Switch to the carve-out PR head (pre-merge tree)
+        if: steps.resolve.outputs.proceed == 'true' && github.event_name == 'pull_request'
         run: |
           SHA="${{ steps.resolve.outputs.sha }}"
-          BRANCH="${{ steps.resolve.outputs.branch }}"
-          HEADSHA="${{ steps.resolve.outputs.headsha }}"
           git rev-parse --verify --quiet "${SHA}^{commit}" >/dev/null || git fetch origin "$SHA"
-          LIVE_HEAD="$(git ls-remote origin "refs/heads/$BRANCH" | awk '{print $1}')"
-          # Drift reference = the lane tip reviewed at ship time (the ship PR's
-          # head sha). Comparing against the MERGE sha would warn on every ship:
-          # that commit lives on `bugfix`, never on the lane.
-          DRIFT_REF="$HEADSHA"
-          [ -z "$DRIFT_REF" ] && DRIFT_REF="$SHA"
-          if [ -n "$LIVE_HEAD" ] && [ "$LIVE_HEAD" != "$(git rev-parse ${DRIFT_REF}^{commit} 2>/dev/null)" ]; then
-            echo "::warning::lane '$BRANCH' head ($LIVE_HEAD) is past the reviewed ship state ($DRIFT_REF) — publishing the reviewed merge sha ($SHA) only; anything newer on the lane is FROZEN out of this lane's releases (monotonic guard) and must ride master/the next lane"
-          fi
           git checkout --detach "$SHA"
 
       - uses: actions/setup-node@v4
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Read version
         id: version
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         run: |
           V="$(node -p "require('./package.json').version")"
           case "$V" in
@@ -296,28 +118,10 @@ jobs:
           REF="${{ steps.resolve.outputs.branch }}"
           SHA="${{ steps.resolve.outputs.sha }}"
           [ -z "$SHA" ] && SHA="$(git rev-parse HEAD)"
-          echo "::notice::Publishing from lane '$REF' @ ${SHA:0:12} -> v$V (master NOT involved)"
-
-      - name: Check plugin manifest versions (#4449)
-        # Same gate as release.yml: the publish tree is a frozen lane state
-        # (last tag + carried fixes + bump), so it must ALREADY carry the
-        # synced plugin manifests — drift fails fast here instead of shipping
-        # a release whose marketplace update detection never fires. See
-        # reference/release.md.
-        if: steps.resolve.outputs.path == 'publish'
-        # #4576 follow-up: lanes cut from a pre-#4449 tag do not carry the
-        # manifest sync script at all -- fail-open with a notice there instead
-        # of MODULE_NOT_FOUND (same existence-guard philosophy as release-manual's
-        # lane guard).
-        run: |
-          if [ -f scripts/sync-codex-plugin-version.mjs ]; then
-            node scripts/sync-codex-plugin-version.mjs --check
-          else
-            echo "::notice::this tree predates #4449 (no scripts/sync-codex-plugin-version.mjs) — manifest sync check skipped for the pre-#4449 lane"
-          fi
+          echo "::notice::Publishing carve-out from '$REF' @ ${SHA:0:12} -> v$V (master NOT involved)"
 
       - name: Publish guard (monotonic + not-already-live)
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         run: |
           VER="${{ steps.version.outputs.version }}"
           LATEST="$(npm view billion-context version)"
@@ -342,7 +146,7 @@ jobs:
         # declarations — only severe releases need one; ordinary releases ship
         # silently with NO entry. Missing entry => notice + pass; present
         # entry => validated and logged.
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         run: |
           VER="${{ steps.version.outputs.version }}"
           case "$VER" in
@@ -361,15 +165,15 @@ jobs:
       - name: Full CI dispatch (all lanes, publish sha)
         # Policy (2026-10-10, after the v0.1.192 carve-out): every release
         # channel must run the COMPLETE CI set at the exact publish sha before
-        # npm publish. The ship PR's own runs sit on the pre-merge head; the
-        # merge sha is brand-new, so the gate dispatches the missing lanes
-        # here; idempotent where runs already exist. Belt-and-braces on top of
-        # the gate branch's required checks.
+        # npm publish. In the PR-gated flow the lanes already ran on the PR
+        # head sha (path-filtered pull_request triggers) — dispatch only what
+        # has no run there (idempotent); the Full CI gate after the pre-flight
+        # blocks publish until green.
         # EMERGENCY fast mode (owner 2026-10-17): dispatch is already a
         # human-picked ref; with fast=true the human explicitly owns skipping
         # this lane matrix — version guards and the build sanity below still
         # run.
-        if: steps.resolve.outputs.path == 'publish' && inputs.fast != true
+        if: steps.resolve.outputs.proceed == 'true' && inputs.fast != true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -381,7 +185,7 @@ jobs:
 
       - name: Pre-flight gate (full suite)
         # keep the claude-native live e2e subtests in this pre-publish gate (#1248)
-        if: steps.resolve.outputs.path == 'publish' && inputs.fast != true
+        if: steps.resolve.outputs.proceed == 'true' && inputs.fast != true
         env:
           ACP_TEST_CLAUDE_NATIVE: "1"
         run: |
@@ -394,7 +198,7 @@ jobs:
         # EMERGENCY fast mode: keep the cheap sanity (install/typecheck/build)
         # so a broken tree still fails loudly, but skip the full npm test —
         # the lane matrix above was skipped by explicit human choice.
-        if: steps.resolve.outputs.path == 'publish' && inputs.fast == true
+        if: steps.resolve.outputs.proceed == 'true' && inputs.fast == true
         run: |
           echo "::warning::FAST MODE — full CI lanes and the full npm test were SKIPPED by an explicit human choice (workflow_dispatch fast=true). Publish sanity = version guards + npm ci + typecheck + build only."
           npm ci
@@ -402,11 +206,11 @@ jobs:
           npm run build
 
       - name: Full CI gate (all lanes green at this sha)
-        # Hard precondition for publish: lanes dispatched above (plus any runs
-        # already at this sha) ran in parallel with the pre-flight; wait them
-        # out now. Any red lane or timeout ⇒ release fails, nothing is
-        # published.
-        if: steps.resolve.outputs.path == 'publish' && inputs.fast != true
+        # Hard precondition for publish: lanes dispatched above (plus the PR's
+        # own lane runs at the head sha) ran in parallel with the pre-flight;
+        # wait them out now. Any red lane or timeout ⇒ release fails, nothing
+        # is published.
+        if: steps.resolve.outputs.proceed == 'true' && inputs.fast != true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CI_GATE_TIMEOUT_MIN: "60"
@@ -419,7 +223,7 @@ jobs:
 
       - name: Check if prerelease
         id: pre
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         run: |
           if echo "${{ steps.version.outputs.version }}" | grep -q '-'; then
             echo "tag=dev" >> $GITHUB_OUTPUT
@@ -430,7 +234,7 @@ jobs:
           fi
 
       - name: Create tag
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -438,23 +242,13 @@ jobs:
           git push origin "v${{ steps.version.outputs.version }}" || true
 
       - name: Publish
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         run: npm publish --tag ${{ steps.pre.outputs.tag }} --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Annotate the merged ship PR (audit trail)
-        # Merge-gated publish: the ship PR is already merged; leave the audit
-        # trail on it so a later reader sees publish == that merge.
-        if: steps.resolve.outputs.path == 'publish' && github.event_name == 'pull_request_target'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr comment "$GITHUB_EVENT_NUMBER" --body "Published v${{ steps.version.outputs.version }} from the POST-MERGE lane head \`${{ steps.resolve.outputs.sha }}\` (gate-branch publish, v3 flow: ${{ steps.resolve.outputs.branch }} → bugfix). Master alignment follows via the auto-opened \`bugfix → master\` PR." \
-            || echo "::notice::could not annotate PR $GITHUB_EVENT_NUMBER (non-fatal)"
-
       - name: Create GitHub Release
-        if: steps.resolve.outputs.path == 'publish'
+        if: steps.resolve.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -485,41 +279,7 @@ jobs:
           curl -sS -f -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-API-Version: 2022-11-28" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
             -H "Content-Type: application/json" \
             "https://api.github.com/repos/${{ github.repository }}/releases" \
             -d @"$RUNNER_TEMP/release.json"
-
-      - name: Open the alignment PR (bugfix -> master, cycle stage P3)
-        # v3: right after a successful publish, open the dedicated alignment
-        # PR carrying the shipped lane content (incl. the version bump) into
-        # master. head=`bugfix` (which now contains exactly the merged lane),
-        # base=master. Title contract (DO NOT RENAME — stage P4 matches it):
-        #   "align master with vX.Y.Z (shipped from <lane>)"
-        # Structural conflicts vs master are EXPECTED (the lane derives from an
-        # older tag while master moved on): resolve master-first, keeping only
-        # lane-unique content. Merging this PR fires stage P4 (auto-cut of the
-        # next lane). Non-fatal: a failed open is flagged and can be retried
-        # manually.
-        if: steps.resolve.outputs.path == 'publish' && github.event_name == 'pull_request_target'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          LANE="${{ steps.resolve.outputs.branch }}"
-          VER="${{ steps.version.outputs.version }}"
-          OPEN_PRS="$(gh pr list --base master --head bugfix --state open --json number 2>/dev/null | jq 'length')"
-          if [ "${OPEN_PRS:-0}" -gt 0 ]; then
-            echo "::notice::an alignment PR (bugfix -> master) is already open — leaving it as-is"
-          else
-            gh pr create --base master --head bugfix \
-              --title "align master with v$VER (shipped from $LANE)" \
-              --body "Auto-opened by Bugfix Release right after v$VER shipped (\`$LANE\` → bugfix, post-merge sha \`${{ steps.resolve.outputs.sha }}\`). Structural conflicts vs master are EXPECTED — the lane derives from an older tag while master moved on; resolve master-first, keeping only lane-unique content (advisories, diagnostics, fixes). Merging this PR completes the release cycle and AUTO-CUTS the next lane (bugfix-v$VER) from tag v$VER (stage P4)." \
-              || echo "::warning::could not open the alignment PR automatically — open it manually: base=master head=bugfix, title MUST start with 'align master with v$VER (shipped from $LANE)' (non-fatal)"
-          fi
-
-      - name: Close the ship PR cycle (notice — the state is derived, nothing to clear)
-        if: steps.resolve.outputs.path == 'publish'
-        run: |
-          LANE="${{ steps.resolve.outputs.branch }}"
-          VER="${{ steps.version.outputs.version }}"
-          echo "::notice::shipped '$LANE' — the fresh tag v$VER freezes this lane (the monotonic guard refuses to re-publish it); the next lane is auto-cut from the tag once master is aligned"

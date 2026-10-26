@@ -229,9 +229,9 @@ export async function handleAdminRoute(req: http.IncomingMessage, res: http.Serv
     if (req.method === "GET" && req.url === "/__bili/stats") return sendStats(res);
     if (req.method === "GET" && req.url?.startsWith("/__bili/cache-report")) return sendCacheReport(res, req.url);
     if (req.method === "GET" && req.url?.startsWith("/__bili/session-report")) return sendSessionReport(res, req.url);
-    if (req.method === "GET" && req.url === "/__bili/status") return sendStatus(res, opts);
+    if (req.method === "GET" && req.url === "/__bili/status") return sendStatus(res, opts, typeof req.headers.host === "string" ? req.headers.host : undefined);
     if (req.method === "GET" && req.url === "/__bili/resign") return sendResignStatus(res);
-    if (req.method === "GET" && req.url === "/__bili/overview") return sendOverview(res, opts);
+    if (req.method === "GET" && req.url === "/__bili/overview") return sendOverview(res, opts, typeof req.headers.host === "string" ? req.headers.host : undefined);
     if (req.method === "GET" && (req.url === "/__bili/sessions" || req.url?.startsWith("/__bili/sessions?"))) return sendWebSessions(res, req);
     if (req.method === "GET" && req.url?.startsWith("/__bili/logs")) return sendWebLogs(res, req);
     if (req.method === "GET" && req.url?.startsWith("/__bili/diagnostics")) return sendDiagnostics(res, req.url);
@@ -1169,7 +1169,9 @@ function updateReadyPayload(): { kind: "available" | "ready"; version: string; s
     return updateBannerPayload(getUpdateVisibility(VERSION));
 }
 
-async function sendStatus(res: http.ServerResponse, opts: ProxyOptions): Promise<void> {
+// laneHost: the host:port this lane was addressed by (req.headers.host) — surfaces on
+// the status/overview wires so multi-lane machines can tell instances apart.
+async function sendStatus(res: http.ServerResponse, opts: ProxyOptions, laneHost?: string): Promise<void> {
     let diskVersion: string | undefined;
     let stale = false;
     let lastInstall: Awaited<ReturnType<typeof getLastInstall>>;
@@ -1190,7 +1192,7 @@ async function sendStatus(res: http.ServerResponse, opts: ProxyOptions): Promise
             loggerLog("warn", `split-session canary (#2170): conversation ${w.base} has live traffic under multiple session keys (design persona forks are excluded): ${w.sessions.map((s) => `${s.id} (requests=${s.requests})`).join("; ")}. For a non-persona host this is the #2165 failure shape (stolen anchor / never-compressing split) — investigate if unexpected.`);
         }
     }
-    res.end(JSON.stringify({ version: VERSION, commit: BUILD_COMMIT, diskVersion, stale, lastInstall, updateReady: updateReadyPayload(), autoRestartOnUpdate: opts.autoRestartOnUpdate, advisory: currentAdvisoryPayload(), updatePolicy: updatePolicyPayload(), pluginAdvisories: detectCostAdvisories(process.env), inFlight: totalInFlight(), splitSessions: splitWarnings, conflicts: summarizeConflicts(listSessions()), storage: storageStatusWire(), snapshotShadow: snapshotShadowStatusWire(), attribution: attributionStatusWire() }, null, 2));
+    res.end(JSON.stringify({ version: VERSION, commit: BUILD_COMMIT, origin: laneHost ?? null, diskVersion, stale, lastInstall, updateReady: updateReadyPayload(), autoRestartOnUpdate: opts.autoRestartOnUpdate, advisory: currentAdvisoryPayload(), updatePolicy: updatePolicyPayload(), pluginAdvisories: detectCostAdvisories(process.env), inFlight: totalInFlight(), splitSessions: splitWarnings, conflicts: summarizeConflicts(listSessions()), storage: storageStatusWire(), snapshotShadow: snapshotShadowStatusWire(), attribution: attributionStatusWire() }, null, 2));
 }
 
 // #2090 plan A — read-only view backing the web UI's "Signed upstreams" card:
@@ -1214,7 +1216,7 @@ function sendResignStatus(res: http.ServerResponse): void {
     }, null, 2));
 }
 
-async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promise<void> {
+async function sendOverview(res: http.ServerResponse, opts: ProxyOptions, laneHost?: string): Promise<void> {
     let diskVersion: string | undefined;
     let stale = false;
     let lastInstall: Awaited<ReturnType<typeof getLastInstall>>;
@@ -1238,6 +1240,7 @@ async function sendOverview(res: http.ServerResponse, opts: ProxyOptions): Promi
     res.end(JSON.stringify({
         overview,
         version: VERSION,
+        origin: laneHost ?? null,
         commit: BUILD_COMMIT,
         diskVersion,
         stale,

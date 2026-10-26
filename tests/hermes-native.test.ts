@@ -1114,7 +1114,7 @@ describe("in-session slash commands (#3697)", () => {
         });
         assert.ok(out, err);
         assert.match(out!.cmd_acp!, /^billion-context@test-1/);
-        assert.match(out!.cmd_acp!, /proxy connected, compression armed\. No model request yet; send one, then run \/acp again\./);
+        assert.match(out!.cmd_acp!, /proxy connected via http:\/\/127\.0\.0\.1:\d+, compression armed\. No model request yet; send one, then run \/acp again\./);
         assert.equal(
             out!.cmd_acp_cache,
             "bili: no ACP session yet for this conversation (send a model request first, then run /acp-cache)",

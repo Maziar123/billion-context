@@ -78,14 +78,17 @@ export function _setBlogRootForTest(root: string | null): void {
 function parseFrontmatter(text: string): { fm: Record<string, string>; body: string } {
     const fm: Record<string, string> = {};
     let body = text;
-    if (text.startsWith("---\n")) {
-        const end = text.indexOf("\n---\n", 4);
+    // Git-for-Windows autocrlf checks .md posts out with CRLF; normalize so
+    // the exact-match fences below survive Windows checkouts (#4599).
+    const src = text.startsWith("---\r\n") ? text.replace(/\r\n/g, "\n") : text;
+    if (src.startsWith("---\n")) {
+        const end = src.indexOf("\n---\n", 4);
         if (end !== -1) {
-            for (const line of text.slice(4, end).split("\n")) {
+            for (const line of src.slice(4, end).split("\n")) {
                 const j = line.indexOf(":");
                 if (j > 0) fm[line.slice(0, j).trim()] = line.slice(j + 1).trim().replace(/^["']|["']$/g, "");
             }
-            body = text.slice(end + 5);
+            body = src.slice(end + 5);
         }
     }
     return { fm, body };

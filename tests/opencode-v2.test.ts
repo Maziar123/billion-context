@@ -435,7 +435,7 @@ test("v2 setup: first /acp before any model request shows the idle notice (proxy
                 const acp = fake.addedCommands.find((c) => c.name === "acp")!;
                 await acp.execute({ sessionID: "ses_acp_idle" });
                 await until(() => fake.syntheticCalls.length === 1);
-                assert.match(fake.syntheticCalls[0].description!, /billion-context@9\.9\.9-test \u2014 proxy connected, no ACP session yet/);
+                assert.match(fake.syntheticCalls[0].description!, /billion-context@9\.9\.9-test \u2014 proxy connected via http:\/\/127\.0\.0\.1:\d+, no ACP session yet/);
                 assert.match(fake.syntheticCalls[0].text, /not an instruction/);
                 assert.equal(fake.syntheticCalls[0].resume, false);
             } finally {

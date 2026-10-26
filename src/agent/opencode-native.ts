@@ -75,7 +75,7 @@
 import { ACP_TOOLS_OPENAI } from "../compress-tool.js";
 import { ensureProxyRunning, LAUNCHER_DEFAULT_HOST, unwrapUpstream, wrapUpstream } from "../launcher.js";
 import { createAcpCommandHooks, showAcpText } from "./opencode-acp-command.js";
-import { markNativeHost, nativeAttachOrigin, nativeBootstrapGate, nativeProxyScriptPath, proxyEnvOrigin, singleFlight } from "./native-bootstrap.js";
+import { markNativeHost, nativeAttachOrigin, nativeBootstrapGate, nativeProxyScriptPath, proxyEnvOrigin, setNativeOriginWaiter, singleFlight } from "./native-bootstrap.js";
 import { createLiveOriginResolver, installNativeFetchIntercept, isModelApiUrl, noteRoutedOrigin, observeRoutedOrigin, readyOrigin, replaceRequestPayload, replaceRequestTarget, routedBiliModelUrl, type LiveOriginResolverDeps, type NativeInterceptState, type UnavailableReason } from "./native-intercept.js";
 import { clearIncrementalProbe, createPrepareDirectSend, INCREMENTAL_TURN_MARKER_HEADER, INCREMENTAL_TURN_ID_HEADER, newIncrementalTurnId, noteIncrementalAck, noteIncrementalRejection, planIncrementalTurn, probeIncrementalTurns, rememberOriginalBody, sweepStale, wireMessagesLookAnthropic, type IncrementalWireMessage } from "./incremental-client.js";
 import { createOpencodeV2Setup, type V2HttpRequestEvent, type V2State } from "./opencode-v2.js";
@@ -84,6 +84,11 @@ import { asciiHeaderValue, fetchProxyVersion, postIdentityRegister, reportRuntim
 import { callLegacyAcpConfig, isLegacyAcpSession, loadLegacyAcp, type LegacyAcpModule } from "./opencode-legacy.js";
 import { logHostEvent } from "./host-log.js";
 import { mediaBytesOfWireBody } from "./media-bytes.js";
+import { loadConfigFile } from "../config.js";
+import { getInlineEngine, INLINE_ORIGIN } from "../inline-engine.js";
+// installInlineTransport is defined in pi-inline.ts but host-agnostic: any
+// request whose origin is INLINE_ORIGIN dispatches to the in-process engine.
+import { installInlineTransport } from "./pi-inline.js";
 
 /** Decides whether the native bootstrap should run in this process. */
 export function shouldBootstrapNativeOpencode(env: NodeJS.ProcessEnv): boolean {
@@ -91,7 +96,8 @@ export function shouldBootstrapNativeOpencode(env: NodeJS.ProcessEnv): boolean {
 }
 
 /** Decide this process's native posture (#809). Precedence kill-switch >
- *  /bili/ rewrite launch > attach > spawn. A preset BILLION_CONTEXT_PROXY is
+ *  /bili/ rewrite launch > explicit inline > attach > spawn (DEFAULT).
+ *  A preset BILLION_CONTEXT_PROXY is
  *  an ATTACH target, not a stand-down: the pseudo-attach hole (preset env +
  *  bare opencode) used to disarm routing entirely while tools still found the
  *  proxy through the env — model traffic went direct, the proxy never saw the
@@ -99,10 +105,20 @@ export function shouldBootstrapNativeOpencode(env: NodeJS.ProcessEnv): boolean {
  *  ("route through THIS proxy") and matches BILLION_CONTEXT_ATTACH semantics
  *  (probe + rewrite + stamp); explicit BILLION_CONTEXT_ATTACH wins when both
  *  are set. A /bili/ launch (BILI_PROVIDER_REWRITES) still stands us down —
- *  its URLs are already proxy-shaped and isModelApiUrl skips them. */
-export function planNativeOpencode(env: NodeJS.ProcessEnv): { mode: "off" | "attach" | "spawn"; attachOrigin?: string } {
+ *  its URLs are already proxy-shaped and isModelApiUrl skips them.
+ *  `inline` (#3278 port, OPT-IN — the default stays the spawned server, per
+ *  owner decision on #4687): run compression IN-PROCESS like the pi lane —
+ * no proxy server is spawned. Enabled only by env BILI_OPENCODE_INLINE=1
+ * (or any non-off value) or file `"opencode": {"inline": true}`; disable
+ *  with 0/false/no/off. An announced attach target beats an absent inline
+ *  choice; explicit inline beats attach. */
+export function planNativeOpencode(env: NodeJS.ProcessEnv, fileInline: boolean | undefined = undefined): { mode: "off" | "inline" | "attach" | "spawn"; attachOrigin?: string } {
     if (env.BILLION_CONTEXT_PLUGIN === "0" || env.BILI_NATIVE_OPENCODE === "0") return { mode: "off" };
     if (env.BILI_PROVIDER_REWRITES !== undefined) return { mode: "off" };
+    const inlineEnv = env.BILI_OPENCODE_INLINE;
+    const inlineEnvOff = inlineEnv !== undefined && ["", "0", "false", "no", "off"].includes(inlineEnv);
+    const inlineEnvOn = inlineEnv !== undefined && !inlineEnvOff;
+    if (!inlineEnvOff && (inlineEnvOn || fileInline === true)) return { mode: "inline" };
     const attachOrigin = nativeAttachOrigin(env) ?? proxyEnvOrigin(env);
     if (attachOrigin !== undefined) return { mode: "attach", attachOrigin };
     return { mode: "spawn" };
@@ -330,7 +346,7 @@ export async function verifyAttachAndRecover(attachOrigin: string): Promise<stri
     return landed;
 }
 
-const plan = planNativeOpencode(process.env);
+const plan = planNativeOpencode(process.env, loadConfigFile().opencode?.inline);
 
 /** Wire the shared intercept state for the planned mode. Attach mode arms
  *  even under NODE_TEST_CONTEXT (it installs no global patches and spawns
@@ -373,6 +389,31 @@ export function armNativeOpencode(p: typeof plan): void {
         } else {
             state.ready = Promise.resolve(undefined);
         }
+    } else if (p.mode === "inline") {
+        // #3278 port (pi lane sibling): the compression engine runs in THIS
+        // process. state.origin freezes SYNCHRONOUSLY so the V2 route and
+        // V1's server() resolve INLINE_ORIGIN without waiting on a port that
+        // does not exist; the chain rewrites model URLs to
+        // `${INLINE_ORIGIN}/bili/<upstream>` and the inline transport link
+        // (installed at module load, BELOW this intercept) catches them and
+        // dispatches to the engine — no DNS, no socket.
+        state.attach = false;
+        state.origin = INLINE_ORIGIN;
+        process.env.BILLION_CONTEXT_PROXY = INLINE_ORIGIN;
+        logHostEvent("info", "[native-client]", "bili-native-opencode: inline mode — compression runs in-process, no proxy server will be started");
+        const start = singleFlight(async () => {
+            await getInlineEngine();
+            return INLINE_ORIGIN;
+        });
+        state.respawn = start;
+        setNativeOriginWaiter({ wait: () => readyOrigin(state) });
+        state.onGiveUp = () => {
+            delete process.env.BILLION_CONTEXT_PROXY;
+            state.origin = undefined;
+        };
+        // Production mirrors spawn mode's fail-fast posture (bootstrap at arm
+        // time); tests stay lazy so nothing starts until one asks for it.
+        state.ready = process.env.NODE_TEST_CONTEXT === undefined ? start() : Promise.resolve(undefined);
     } else if (process.env.NODE_TEST_CONTEXT === undefined) {
         const start = singleFlight(bootstrap);
         state.respawn = start;
@@ -384,6 +425,16 @@ export function armNativeOpencode(p: typeof plan): void {
 }
 
 if (plan.mode !== "off") armNativeOpencode(plan);
+
+// node:test imports this module for plan/arm surfaces — never patch
+// globalThis.fetch from inside a test run. #3278 port: chain order is install
+// order — the inline transport must sit BELOW the fetch intercept so the
+// `/bili/<upstream>` rewrite lands on that link instead of egressing toward a
+// proxy port that does not exist.
+if (process.env.NODE_TEST_CONTEXT === undefined && plan.mode === "inline") {
+    installInlineTransport();
+    installNativeFetchIntercept(state);
+}
 
 /** Test hook: expose the armed runtime-recovery seam (mirrors dsh-native). */
 export function _stateRespawnForTest(): (() => Promise<string | undefined>) | undefined {

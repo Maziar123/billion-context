@@ -480,11 +480,18 @@ entries:
     desc_zh: "内置 pi lane 子代理（acp_delegate）面（#2230 配置搬家）。billion-context.json 的 pi.subagents 段拥有 delegate 配置；acp.json 四键（delegate/delegatePrompt/displayUsage/debug）为已废弃回退源，仅段缺失时读取。prompt 取代 delegatePrompt；debug 限定子代理子系统。布尔简写 subagents: false 整体关闭。完整字段表见 CONFIGURATION.md 的 pi 段。"
   - key: pi.inline
     type: boolean
-    default: "true"
+    default: "false"
     env: BILI_PI_INLINE
     group: behavior
-    desc_en: "Pi inline lane (#3278; DEFAULT since #4571): the pi extension's compression runs IN-PROCESS — no spawned proxy, no ephemeral port; model traffic and the /__bili//__acp tool surface are served by an in-process engine through a pseudo-origin, the codex Responses WebSocket lane by a loopback-only WS bridge, and the Web UI by a loopback-only web listener booted with the engine. Set false (or BILI_PI_INLINE=0/false/no/off) to get the spawned proxy server back. Resolved env > file; an announced attach target (launcher-set BILLION_CONTEXT_PROXY/ATTACH) still beats the default, but never an explicit inline choice."
-    desc_zh: "pi 内联压缩通道（#3278；#4571 起默认开启）：pi 扩展的压缩在进程内完成——不派生代理进程、无临时端口；模型流量与 /__bili//__acp 工具面由进程内引擎经伪源站服务，codex 的 Responses WebSocket 通道走随引擎启动的仅回环 WS 桥，Web UI 走随引擎启动的仅回环监听。设为 false（或 BILI_PI_INLINE=0/false/no/off）即可换回派生代理服务器的模式。解析顺序 env > 文件；启动器预置的附着目标（BILLION_CONTEXT_PROXY/ATTACH）仍优先于默认值，但永远不覆盖显式开启。"
+    desc_en: "Pi inline lane (#3278; OPT-IN — #4687 reverts the #4571 default flip, default stays the spawned proxy): the pi extension's compression runs IN-PROCESS — no spawned proxy, no ephemeral port; model traffic and the /__bili//__acp tool surface are served by an in-process engine through a pseudo-origin, the codex Responses WebSocket lane by a loopback-only WS bridge, and the Web UI by a loopback-only web listener booted with the engine. Set true (or BILI_PI_INLINE=1/on/yes/TRUE) to enable. Resolved env > file; an explicit inline choice always beats an announced attach target (launcher-set BILLION_CONTEXT_PROXY/ATTACH); when unset the lane behaves exactly as before (attach/spawn). `bili pi-inline` presets the env for the one-command lane."
+    desc_zh: "pi 内联压缩通道（#3278；需手动开启——#4687 收回 #4571 的默认翻转，默认仍是派生代理）：pi 扩展的压缩在进程内完成——不派生代理进程、无临时端口；模型流量与 /__bili//__acp 工具面由进程内引擎经伪源站服务，codex 的 Responses WebSocket 通道走随引擎启动的仅回环 WS 桥，Web UI 走随引擎启动的仅回环监听。设 true（或 BILI_PI_INLINE=1/on/yes/TRUE）开启。解析顺序 env > 文件；显式开启永远压过附着目标，未设置时行为与旧版一致（attach/spawn）。`bili pi-inline` 一键车道会预置该变量。"
+  - key: opencode.inline
+    type: boolean
+    default: "false"
+    env: BILI_OPENCODE_INLINE
+    group: behavior
+    desc_en: "OpenCode inline lane (#3278 port; OPT-IN — the default stays the spawned proxy, per owner decision on #4687): the opencode plugin's compression runs IN-PROCESS — no spawned proxy, no ephemeral port, no MITM certs; model traffic and the /__bili/ tool surface are served by an in-process engine through a pseudo-origin (verified on the Bun host). Set true (or BILI_OPENCODE_INLINE=1) to enable. Resolved env > file; an explicit inline choice always beats an announced attach target, an absent choice falls back to attach/spawn as before. `bili opencode-inline` is the one-command lane."
+    desc_zh: "opencode 内联压缩通道（#3278 移植；需手动开启——按 #4687 决定，默认仍是派生代理）：opencode 插件的压缩在进程内完成——不派生代理进程、无临时端口、无 MITM 证书；模型流量与 /__bili/ 工具面由进程内引擎经伪源站服务（已在 Bun 宿主验证）。设 true（或 BILI_OPENCODE_INLINE=1）开启。解析顺序 env > 文件；显式开启永远压过附着目标，未设置时行为与旧版一致（attach/spawn）。`bili opencode-inline` 一键车道。"
   - key: mitm.enabled
     type: boolean
     default: "true"

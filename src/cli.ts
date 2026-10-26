@@ -52,6 +52,7 @@ Usage:
   bili pi [opts --] [args]         start a proxy + launch pi against it (cert-MITM)
   bili pi-test [opts --] [args]    like bili pi but injects --no-extensions (clean test)
   bili pi-inline [opts --] [args]  launch pi on the in-process engine — no proxy at all (BILI_PI_INLINE)
+  bili opencode-inline [opts --] [args]  launch opencode on the in-process engine — no proxy at all (BILI_OPENCODE_INLINE)
   bili codex [opts --] [args]      start a proxy + launch codex against it (cert-MITM)
   bili claude [opts --] [args]     start a proxy + launch claude against it (cert-MITM)
   bili omp [opts --] [args]        start a proxy + launch omp against it (cert-MITM)
@@ -134,6 +135,7 @@ Launcher (bili pi / bili codex / bili claude / bili omp / bili opencode / bili h
     bili pi -- print "hi"                 # args after the client are passed through
     bili pi-test                          # pi through the proxy with extensions off (proxy owns compression)
     bili pi-inline                        # pi with the in-process engine — no proxy, no MITM certs
+    bili opencode-inline                  # opencode with the in-process engine — no proxy, no MITM certs
     bili codex                            # launch codex through the proxy
     bili claude                           # launch claude through the proxy
     bili omp                              # launch omp through the proxy (pi-based; /bili/ rewrite)

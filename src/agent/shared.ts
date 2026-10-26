@@ -487,8 +487,8 @@ export const V2_SYNTHETIC_TEXT = "[bili-acp-status] ACP status panel was display
 
 /** Armed-but-idle /acp notice (proxy live, no model request sent yet). One
  *  source of truth for pi / dsh / opencode (#883). */
-export function armedIdleNotice(version: string): string {
-    return `billion-context@${version} — proxy connected, compression armed. No model request yet; send one, then run /acp again.`;
+export function armedIdleNotice(version: string, base?: string): string {
+    return `billion-context@${version} — proxy connected${base ? ` via ${base}` : ""}, compression armed. No model request yet; send one, then run /acp again.`;
 }
 
 /** Fallback when the version probe also fails — a warning, not an info notice. */

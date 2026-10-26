@@ -1774,7 +1774,7 @@ export function handlePluginStatus(conversationId: string, res: import("node:htt
         // same addition so the Session-only derivation (unpruned − sent) still
         // isolates pruned originals on one scale.
         panel = buildStatusPanel({
-            version: `billion-context@${PROXY_VERSION}${BUILD_COMMIT && BUILD_COMMIT !== "unknown" ? ` (${BUILD_COMMIT})` : ""} · pack: ${session.meta.activePack ?? "default"}${deps.inlineLane ? " · inline" : ""}`,
+            version: `billion-context@${PROXY_VERSION}${BUILD_COMMIT && BUILD_COMMIT !== "unknown" ? ` (${BUILD_COMMIT})` : ""} · pack: ${session.meta.activePack ?? "default"}${deps.inlineLane ? " · inline" : ""}${deps.webOrigin ? ` · via ${deps.webOrigin}` : ""}`,
             // #2671: effective storage mode — legacy/shadow/full, including
             // the encryption-blocked downgrade. Display-only, from the env the
             // store actually resolved.

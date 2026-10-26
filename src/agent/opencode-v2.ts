@@ -553,7 +553,7 @@ export function createOpencodeV2Setup(options: OpencodeV2SetupOptions = {}): (ct
                                             version = undefined;
                                         }
                                         text = version !== undefined
-                                            ? `billion-context@${version} — proxy connected, no ACP session yet. Send a model request, then run /acp again.`
+                                            ? `billion-context@${version} — proxy connected via ${base}, no ACP session yet. Send a model request, then run /acp again.`
                                             : "bili: no ACP session yet (send a model request first, then run /acp)";
                                     } else if (!status) {
                                         // fetchStatus soft-fails to undefined both when the proxy 404s an absent or
@@ -561,7 +561,7 @@ export function createOpencodeV2Setup(options: OpencodeV2SetupOptions = {}): (ct
                                         // manifest to claim "connected" only when it answers.
                                         const version = await fetchProxyVersion(base).catch(() => undefined);
                                         text = version !== undefined
-                                            ? `billion-context@${version} — proxy connected, no ACP session yet. Send a model request, then run /acp again.`
+                                            ? `billion-context@${version} — proxy connected via ${base}, no ACP session yet. Send a model request, then run /acp again.`
                                             : "bili: cannot reach the bili proxy (run `bili start`, then run /acp again)";
                                     } else {
                                         const errText = status?.error;
