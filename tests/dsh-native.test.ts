@@ -1879,7 +1879,11 @@ test("#1117 apply() installs takeoverGate keyed on currentInitiator attribution"
             const gate = _stateTakeoverGateForTest();
             assert.ok(gate !== undefined, "takeoverGate installed");
             // unattributed (background chain, third-party in-process plugin) → NOT claimed
-            assert.equal(gate("https://api.anthropic.com/v1/messages"), false);
+            const rawNoneGate = gate("https://api.anthropic.com/v1/messages");
+            // #4829 review: the no-init (WS-lane-shaped) call must keep its SYNCHRONOUS
+            // verdict class — native-ws-intercept.ts compares with === false, no await.
+            assert.equal(rawNoneGate, false);
+            assert.equal(await rawNoneGate, false);
             // attributed (the host's own agent chain) → claimed
             ctx.setInitiator({ session: { id: "s1117" } });
             assert.equal(gate("https://api.anthropic.com/v1/messages"), true);
@@ -1914,8 +1918,9 @@ test("#1158 apply() gate refusal logs each endpoint once per process with attrib
             const refusedLines = (): string[] => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "").split("\n").filter((l) => l.length > 0 && l.includes("takeover gate refused"));
             try {
                 const url = "https://api.gate-probe.test/v1/chat/completions";
-                assert.equal(gate(url), false, "unattributed → refused");
-                assert.equal(gate(url), false, "second refusal of the same endpoint");
+                // #4829: the none arm settles async — the recall claim may decode bodies
+                assert.equal(await gate(url), false, "unattributed → refused");
+                assert.equal(await gate(url), false, "second refusal of the same endpoint");
                 let lines = refusedLines();
                 assert.equal(lines.length, 1, `expected one refusal line per endpoint, got: ${lines.join(" | ")}`);
                 // #3651 paste-safe sink: non-public hosts are masked in the line; the dedup key
@@ -1923,11 +1928,11 @@ test("#1158 apply() gate refusal logs each endpoint once per process with attrib
                 assert.match(lines[0]!, /https:\/\/<private-host>\/v1\/chat\/completions/);
                 assert.match(lines[0]!, /no active initiator attribution/);
                 // A query string neither spawns a new line nor leaks into it.
-                assert.equal(gate(`${url}?key=sk-do-not-log`), false);
+                assert.equal(await gate(`${url}?key=sk-do-not-log`), false);
                 assert.equal(refusedLines().length, 1);
                 assert.ok(!fs.readFileSync(logFile, "utf8").includes("do-not-log"), "query string must not reach the log");
                 // A different endpoint earns its own line.
-                assert.equal(gate("https://api.other-probe.test/v1/messages"), false);
+                assert.equal(await gate("https://api.other-probe.test/v1/messages"), false);
                 assert.equal(refusedLines().length, 2);
                 // Attributed traffic claims silently.
                 ctx.setInitiator({ session: { id: "s1158" } });
@@ -1969,11 +1974,12 @@ test("#1158 L2 gate three-state: thrown attribution is a distinct state; counts 
             const refusedLines = (): string[] => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "").split("\n").filter((l) => l.length > 0 && l.includes("takeover gate refused"));
             try {
                 const url = "https://api.gate-l2.test/v1/chat/completions";
-                // four same-state (none) refusals → exactly one line; counting continues silently
-                assert.equal(gate(url), false);
-                assert.equal(gate(url), false);
-                assert.equal(gate(url), false);
-                assert.equal(gate(url), false);
+                // four same-state (none) refusals → exactly one line; counting continues
+                // silently (#4829: the none arm settles async — the recall claim may decode bodies)
+                assert.equal(await gate(url), false);
+                assert.equal(await gate(url), false);
+                assert.equal(await gate(url), false);
+                assert.equal(await gate(url), false);
                 let lines = refusedLines();
                 assert.equal(lines.length, 1, `expected one line for repeated same-state refusals, got: ${lines.join(" | ")}`);
                 assert.match(lines[0]!, /no active initiator attribution/);
@@ -1997,7 +2003,7 @@ test("#1158 L2 gate three-state: thrown attribution is a distinct state; counts 
                 assert.equal(refusedLines().length, 2);
                 // back to plain none → transition the other way, count keeps running
                 ctx.agents.currentInitiator = () => undefined;
-                assert.equal(gate(url), false);
+                assert.equal(await gate(url), false);
                 lines = refusedLines();
                 assert.equal(lines.length, 3);
                 assert.match(lines[2]!, /refusals so far: 7 \(state threw→none\)$/);
@@ -2295,6 +2301,37 @@ test("#4111 mediaBytesOfWireBody/bodyProvablyOverWindow: prices the inline-media
     assert.equal(bodyProvablyOverWindow(undefined, mediaOnlyInit, 1000), undefined, "no body → no size arm");
     assert.equal(bodyProvablyOverWindow({ bytes: mixedBytes }, mixedInit, undefined), undefined, "no window → no size arm");
     assert.notEqual(bodyProvablyOverWindow({ bytes: mixedBytes }, undefined, 1000), undefined, "no init to re-price → media cannot be proven → the raw floor keeps the old (conservative) verdict");
+});
+
+test("#4912 typed-array init.body: an undecodable buffer degrades to the conservative verdict instead of throwing out of the gate face", () => {
+    // Models V8's real limit: only buffers whose decoded form exceeds the
+    // max string length throw RangeError; small decodes keep working.
+    const savedDecoder = globalThis.TextDecoder;
+    const Real = globalThis.TextDecoder;
+    const passthrough = new Real();
+    const bigUrl = `data:image/png;base64,${"A".repeat(4_200_000)}`;
+    const raw = JSON.stringify({ messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: bigUrl } }] }] });
+    const init: RequestInit = { method: "POST", body: new TextEncoder().encode(raw) };
+    const bytes = Buffer.byteLength(raw);
+    try {
+        globalThis.TextDecoder = class {
+            constructor(_label?: string, _options?: unknown) {}
+            decode(buf?: Uint8Array | ArrayBuffer): string {
+                if (buf !== undefined && buf.byteLength > 1_000_000) throw new RangeError("Invalid string length");
+                return passthrough.decode(buf);
+            }
+        } as unknown as typeof TextDecoder;
+        // Pre-fix this call threw RangeError out of the gate face. Now the
+        // undecodable buffer bills ALL bytes as core text (media unprovable).
+        const doom = bodyProvablyOverWindow({ bytes }, init, 1000);
+        assert.ok(doom !== undefined, "undecodable over-bar body keeps the conservative (all-core-text) verdict");
+        assert.equal(doom?.mediaBytes, 0);
+        assert.equal(doom?.coreBytes, bytes);
+    } finally {
+        globalThis.TextDecoder = savedDecoder;
+    }
+    // Decodable twin of the SAME body: media credited exactly → not provably over.
+    assert.equal(bodyProvablyOverWindow({ bytes }, init, 1000), undefined, "the guard must not zero media credits on the normal path");
 });
 
 test("#3581 gate degradation reports event-driven; give-up latch stops pointless settle-retries on a dead scope", async () => {

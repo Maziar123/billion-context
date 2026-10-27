@@ -54,7 +54,6 @@ import { prepareGoogle, prepareGoogleCountTokens } from "./server/prepare-google
 import { prepareResponses, prepareResponsesCompact } from "./server/prepare-responses.js";
 import { FORCE_TEXT_PROTOCOL } from "./server/inject.js";
 export { isChatGptCodexUpstream, isCodexResponsesLite, resolvePromptCacheKey, shouldInjectPromptCacheKey } from "./server/prepare-responses.js";
-import { reconcileFoldCoverage, noteSystemPromptFingerprint, resolveFoldReconcileMode } from "./fold-reconcile.js";
 import { biliToolsDeclaredOnWire, countBiliToolUses, evaluateSelfHealRound, nudgeSuppressed, pluginLaneDegraded, pluginLaneRestore } from "./session-self-heal.js";
 import { getSession, hasProcessedState, listSessions, peekSession, type PendingRetrieval, type Session, initSessions, markDirty, flushAllSessions, acquireInFlight, releaseInFlight, totalInFlight, snapshotMessages, ensureCanonicalId, storeEffectiveConfig, foldCoverage, postRebuildAnchorTokens, setPostRebuildAnchor, tickPostRebuildAnchor, splitSessionWarnings, usageAnchorCycleStale, staleSmallAnchorFallback, RESPONSES_TURN_SEPARATOR_ID_PREFIX } from "./session.js";
 import { detectStaleInstall } from "./update.js";
@@ -158,6 +157,7 @@ import { pipeThrough } from "./server/stream-io.js";
 import { artifactSeedHit, detectAcpArtifacts } from "./server/chain-artifacts.js";
 import { droppedOpenaiParts } from "./wire-drop-warn.js";
 import { BP_MAX, ROLLOUT_FEATURES, rolloutDecisions, rolloutInstallId, warnRolloutConfigProblems } from "./rollout.js";
+import { SnapshotAnchorFallbackError, WS_ANCHORED_REQ_PROP } from "./server/snapshot-render.js";
 export { forward } from "./server/relay.js";
 
 // #1086/#1218: the per-session chain-verdict memory moved to plugin.ts
@@ -676,6 +676,15 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         try {
             await handle(req, res, opts, core, config, log, instanceId, instanceStartedAt, proxyWatchers, initialWatcherPid, adminCtx);
         } catch (err) {
+            // #4817/#4804: an anchored WS delta continuation whose seam check
+            // failed is OWNED by the WS session above — it answers with the
+            // client's standard 400 previous_response_not_found frame, clears
+            // the checkpoint chain, and the client's full replay re-anchors.
+            // Swallowing it into the generic 503 here would retain the
+            // checkpoint and loop the client on the same deterministic miss.
+            // The rethrow rides ONLY the request the WS session stamped
+            // (WS_ANCHORED_REQ_PROP); plain-HTTP lanes keep the 503 shape.
+            if (err instanceof SnapshotAnchorFallbackError && (req as unknown as Record<symbol, unknown>)[WS_ANCHORED_REQ_PROP] !== undefined) throw err;
             const msg = String(err);
             const e = err as { name?: string; message?: string };
             // #411: a client cancel aborts the upstream fetch via
@@ -2475,6 +2484,20 @@ export function diagNudge(turn: { nudge?: { shouldInject: boolean; reason: strin
 // all require usage >= their pct lines). #728 fix: such sessions fall back to
 // the PREVIOUS turn's locally-measured outbound payload upper bound
 // (session.stats.localInputEstimate, recorded in prepare* each turn). The
+// #4805: the meter-side size guard (anchorImpossible below) also requires an ABSOLUTE gap,
+// not just the ratio: on early/small sessions the char-count upper bound is already an order
+// of magnitude above the real token count, so a pure-ratio test would demote healthy small
+// anchors to estimates and lose usage-grade sizing exactly where it is cheapest to keep.
+const SIDE_LANE_ANCHOR_MIN_ABS_DELTA = 25_000;
+// The anchor's OWN request snapshot (lastUsagePayloadUpper, taken at settle)
+// carries the honesty margin: a usage report can legitimately under-report a
+// text-heavy payload by ~8x (#1820 B — char-bound 220k over a 5k report), so the
+// anchor size alone cannot prove pollution; requiring the payload to ALSO tower
+// 8x over the payload of the request that produced the anchor keeps #1820 B's
+// honest anchors on the fast path while #4805's side-lane sample (anchor request
+// ~3k upper, main payload ~680k upper) is refused with 2-20x margin.
+const SIDE_LANE_ANCHOR_IMPOSSIBLE_RATIO = 8;
+
 // estimator only errs EARLY (char-count upper bound → compress earlier, never
 // later), is active only while lastInputTokens == 0 (a real usage report takes
 // precedence immediately — same invariant as #604's armFailureShrink
@@ -2505,7 +2528,20 @@ export function effectiveTokenCount(session: Session, msgs: CoreMessage[], inbou
     // #4383 (both guards): stale-small — a sidecar/side-request sample under
     // the same session id, superseded by later main sends — must not freeze the
     // meter either; fall through to the fresher measurement.
-    if (!anchorStale && session.stats.lastInputTokens > 0 && (session.stats.lastInputTokensSource === "usage" || session.stats.lastInputTokensSource === "overflow-arm") && staleSmallAnchorFallback(session.stats, session.stats.lastInputTokens) === null) return { tokens: session.stats.lastInputTokens, source: "usage" };
+    // #4805 (size guard): a FRESH tiny anchor can still be lane pollution — a
+    // 2-message side request's usage (5100 tok) overwrote a 1700-message
+    // conversation's anchor and froze compression until the context blew the
+    // window. Time-based staleness cannot catch it (it is seconds old), but the
+    // size dimension can: a usage sample cannot describe a resent history whose
+    // own upper bound is ~an order of magnitude larger. Fall through to the
+    // local estimate then — the nudge sizes the payload it actually sees.
+    const payloadUpperNow = estimateCoreMessagesUpper(msgs) + inboundImageTokens;
+    const anchorImpossible = session.stats.lastInputTokens > 0
+        && (session.stats.lastUsagePayloadUpper ?? 0) > 0
+        && payloadUpperNow >= session.stats.lastInputTokens * SIDE_LANE_ANCHOR_IMPOSSIBLE_RATIO
+        && payloadUpperNow >= session.stats.lastUsagePayloadUpper! * SIDE_LANE_ANCHOR_IMPOSSIBLE_RATIO
+        && payloadUpperNow - session.stats.lastInputTokens > SIDE_LANE_ANCHOR_MIN_ABS_DELTA;
+    if (!anchorStale && !anchorImpossible && session.stats.lastInputTokens > 0 && (session.stats.lastInputTokensSource === "usage" || session.stats.lastInputTokensSource === "overflow-arm") && staleSmallAnchorFallback(session.stats, session.stats.lastInputTokens) === null) return { tokens: session.stats.lastInputTokens, source: "usage" };
     // #1820: right after a preflight rebuild the usage-grade baseline above is
     // momentarily absent (the rebuild request's own report hasn't landed yet,
     // or the upstream never reports), and every branch below sizes on the
@@ -2517,7 +2553,7 @@ export function effectiveTokenCount(session: Session, msgs: CoreMessage[], inbou
     // reporting upstreams fall back to legacy sizing rather than a frozen meter.
     const anchored = postRebuildAnchorTokens(session);
     if (anchored > 0) return { tokens: anchored, source: "estimate" };
-    const raw = estimateCoreMessagesUpper(msgs) + inboundImageTokens;
+    const raw = payloadUpperNow;
     // #1569/#1839: while the latest baseline is not usage-grade (the transient
     // window right after a failed turn), sizing on ANY re-derived view is how
     // ghosts enter: #1569 first tried min(est, raw) — the char-count upper
@@ -4148,11 +4184,19 @@ function formatBytes(n: number): string {
 // bytes are counted with Buffer.byteLength since undici sends UTF-8 bytes even
 // for string bodies (.length would count UTF-16 chars and undercount any
 // non-ASCII injection). Omitted on paths that fail fast without forwarding.
+// #4528: inbound histories past this size pay an O(messages) synchronous scan
+// pass per turn on the main thread, large enough to starve the event loop and
+// freeze every endpoint on the same listener — warn so a pathological session
+// shows up in the log instead of being found through a frozen UI.
+const SLOW_SESSION_MSG_WARN = 1000;
 export function logRequestCost(log: (level: string, msg: string) => void, sessionId: string, msgs: number | null, inboundBytes: number, t0: number, outbound?: string | Buffer): void {
     const ms = Math.max(0, Math.round(performance.now() - t0));
     const outboundField = outbound !== undefined ? `, outbound=${formatBytes(Buffer.byteLength(outbound))}` : "";
     const view = currentFetchTransport() ? ", view=ws-expanded" : "";
     log("info", `[${sessionId}] request: ${msgs ?? "?"} msgs, inbound=${formatBytes(inboundBytes)}${outboundField}, local=${ms}ms${view}`);
+    if (msgs !== null && msgs > SLOW_SESSION_MSG_WARN) {
+        log("warn", `[${sessionId}] slow-session: ${msgs} msgs / inbound=${formatBytes(inboundBytes)} took local=${ms}ms — per-turn O(messages) synchronous scans are starving the event loop (#4528); consider closing/restarting the session or enabling compression`);
+    }
 }
 
 /** Thrown by readBody when the request body exceeds the configured receive-body

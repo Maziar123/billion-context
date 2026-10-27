@@ -241,7 +241,9 @@ const DEFAULT_HTTP_OUTBOUND_BYTES = 10 * 1024 * 1024;
  *  HTTP path now resolves them here with a 5 GiB default so multi-gigabyte single
  *  requests are accepted instead of reset. They bound SINGLE-REQUEST in-RAM buffering
  *  (~2x peak while a body is read+decoded); cross-turn history lives in SQLite and is
- *  unaffected. The WebSocket lanes keep the fixed 100 MiB surface (MAX_REQUEST_BYTES). */
+ *  unaffected. The Responses WebSocket lanes resolve the same budget for their wire
+ *  frames, reconstructed-body admission, upstream guards and checkpoint accounting
+ *  (#4804: they previously kept a fixed 100 MiB surface). */
 export function limitsReceiveBytes(): number {
     const v = tInt("BILI_RECEIVE_BODY_BYTES", loadConfigFile().network?.receiveBodyBytes);
     return Number.isFinite(v) && v > 0 ? Math.floor(v) : DEFAULT_LIMITS_RECEIVE_BYTES;
