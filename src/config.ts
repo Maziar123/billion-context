@@ -16,6 +16,7 @@ import type { ImageBillingMode } from "./image-tokens.js";
 import type { ReasoningGuardConfig } from "./reasoning-guard.js";
 import type { OutputSteeringConfig } from "./output-steering.js";
 import { parseExternalSummaryChain, type ExternalSummaryChain, validSummaryCredentialName } from "./external-summary-settings.js";
+import { parseBillingSettings, setBillingOverrides } from "./billing.js";
 
 export function safeReadJson(path: string): unknown {
     try {
@@ -1460,6 +1461,16 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
     // override it (env wins for environment-specific overrides).
     const fileConfig = loadConfigFile();
 
+    // #4899: parse + publish the billing price overrides here so every reload
+    // path (startup, web Apply onChanged, /__bili/config reload) funnels
+    // through ONE setter — deep settle sites read the module table, no
+    // options plumbing. Invalid shape drops the whole block loudly (#155).
+    const billingSettings = parseBillingSettings(fileConfig.billing);
+    if (fileConfig.billing !== undefined && billingSettings === undefined) {
+        loggerLog("warn", '[acp-config] ignoring invalid "billing" block (expected { prices: { "<model>": { input, output?, cacheRead?, cacheWrite? } } } with $/Mtok numbers)');
+    }
+    setBillingOverrides(billingSettings?.prices);
+
     // #3651: BILI_ALLOW_DSH_COMPACTION no longer exists — surface a stale value
     // once instead of silently ignoring it (§7.3 honest output).
     if (env.BILI_ALLOW_DSH_COMPACTION !== undefined && !removedDshEnvWarned) {
@@ -1653,6 +1664,17 @@ export function resolveRecordedMitmDomains(passed: readonly string[] | undefined
         ...(fileConfig.mitm?.domains ?? []),
         ...splitCsv(effective),
     ]);
+}
+
+/** #4850: passthrough-axis twin of resolveRecordedMitmDomains (#3436
+ *  discipline) — an instance record carries the CONFIG-MERGED mode
+ *  (`passthrough: true` in the config file flips a spawned child even when
+ *  the launcher passed no --passthrough flag; an inherited ACP_PASSTHROUGH
+ *  reaches the child the same way), while launcher callers pass a raw boolean
+ *  flag (native lanes hardcode false). Attach-side shape checks must compare
+ *  against what a spawned child would RECORD, not the raw caller input. */
+export function resolveRecordedPassthrough(flag: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+    return flag || passthroughState(env).enabled;
 }
 
 /** #1392: opted-in non-http(s) baseUrl providers — providers-table entries
@@ -1926,6 +1948,11 @@ type FileConfig = {
      *  BILI_ROLLOUT_<FEATURE>=0/1 (UPPER_SNAKE name) wins over everything,
      *  including `enabled`. */
     rollout?: RolloutFileConfig;
+    /** Per-model billing prices for the web panel's spend/savings display
+     *  (#4899): `billing.prices["<model id>"] = {input, output?, cacheRead?,
+     *  cacheWrite?}` in $/Mtok. Overrides the models.dev registry snapshot;
+     *  resolved through the same name matching. */
+    billing?: Record<string, unknown>;
     /** Security posture block (#3373) — knobs that WIDEN a trust boundary
      *  live here so the exposure surface is auditable in one place.
      *  `adminRelay` (default false, fail-closed): allow an embedding host
@@ -2228,6 +2255,8 @@ const KNOWN_TOP_LEVEL_KEYS = new Set([
     "dsh",
     "compat", "imageBilling", "imageTokenCap", "claude", "native", "resign",
     "pi", "storage", "security",
+    // #4899: per-model billing prices (web panel pricing editor).
+    "billing",
     // #2030 subsystem blocks:
     "network", "persist", "sessions", "plugin", "update", "diagnostics",
     "fakeCompletion", "codexCompact", "ccrRetrievalTtlMs", "decompressTmpCap",

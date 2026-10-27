@@ -81,6 +81,7 @@ billion-context/
 │   ├── affinity-persist.ts       # Prefix-affinity persistence across proxy restarts (#499)
 │   ├── cache-warn.ts             # Upstream prompt-cache collapse warning (#499)
 │   ├── cache-ledger.ts           # Per-round cache usage ledger (wire-protocol aware, #1536)
+│   ├── billing.ts                # Per-model USD prices (#4899): billing.prices overrides > models.dev; stamps per request, bills session.stats.costUsd; panel $ faces derive live from the current price table incl. a compression payback view
 │   ├── acp-status.ts             # acp_status payload (ranges/nudge recomputed live)
 │   ├── acp-panel.ts              # Cache report wrapper for transcript display
 │   ├── acp-cache-diff.ts         # Offline prefix-diff attribution over dumps (#1266)

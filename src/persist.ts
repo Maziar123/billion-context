@@ -167,6 +167,7 @@ interface PersistedSession {
         // pendingFoldUsage / lastLocalTextEstimate(+Origin), which ride along
         // but are deliberately not restored — see buildSession).
         localInputEstimate?: number;
+        lastUsagePayloadUpper?: number;
         lastUsageGradeTokens?: number;
         calibratedEstimate?: number;
         calibratedEstimateOrigin?: string;
@@ -1625,6 +1626,12 @@ export class SessionStore {
             }
             if (outcome.superseded.size > 0) {
                 session.restampSuperseded = outcome.superseded;
+            } else {
+                // #4797: a converged pass (everything already aligned) must
+                // CLEAR any stale map — the guard keeps consulting the
+                // process-lifetime map, and an empty outcome that leaves an
+                // old map in place keeps refusing live refs forever.
+                delete session.restampSuperseded;
             }
             // The token snapshot is keyed by ref (#3488 render-refs): renumbered
             // refs would otherwise inherit the stale count of whichever message
@@ -1714,6 +1721,14 @@ export class SessionStore {
         return this.shadow !== undefined && !this.shadow.stats.disabled;
     }
 
+    /** #4804: true only in FULL mode — the one mode whose unified reads
+     *  (unifiedMessageIdRows/unifiedMessageRows/…) actually serve data. In
+     *  shadow mode every read returns null, so read-dependent lanes gate on
+     *  THIS predicate instead of replicasAvailable(). */
+    unifiedReads(): boolean {
+        return this.enabled && this.shadow?.readsUnified === true;
+    }
+
     /** #4316 PR3/3: raw id → canonical seq map for the one-time ledger
      *  re-stamp (single-row ids only — multi-generation ids are excluded by
      *  the store). Null when the unified store is unavailable; the re-stamp
@@ -1727,30 +1742,35 @@ export class SessionStore {
         }
     }
 
-    /** #4730: highest live (non-retired) seq — the fork endpoint's inclusive
-     *  throughSeq. NOT count - 1 from unifiedLiveRowCount: tombstones keep
-     *  their seq, so a retired middle row makes the count shortchange the
-     *  clone and the child silently loses the newest live rows. Null when the
-     *  unified store is unavailable (kernel-only fork) or no live rows. */
-    unifiedLastLiveSeq(id: string): number | null {
-        if (!this.shadow) return null;
+    /** #4730/#4911: highest live (non-retired) seq — the fork endpoint's
+     *  inclusive throughSeq, awaited from the (async) fork lane. NOT count - 1
+     *  from unifiedLiveRowCount: tombstones keep their seq, so a retired
+     *  middle row makes the count shortchange the clone and the child
+     *  silently loses the newest live rows. Network backends cannot serve the
+     *  sync facade — this twin routes through the backend (#4911). Null when
+     *  the unified store is unavailable (kernel-only fork) or no live rows. */
+    unifiedLastLiveSeqAsync(id: string): Promise<number | null> {
+        if (!this.shadow) return Promise.resolve(null);
         try {
-            return this.shadow.lastLiveSeq(id);
+            return this.shadow.lastLiveSeqAsync(id);
         } catch {
-            return null;
+            return Promise.resolve(null);
         }
     }
 
-    /** #4316 PR3/3: fork adoption row clone (child keeps the parent's seq
-     *  values so cloned kernel refs keep pointing at the same ledger
-     *  positions). Null when the unified store is unavailable — the fork
-     *  endpoint then proceeds exactly as before (kernel-only clone). */
-    unifiedCloneSessionRows(parentId: string, childId: string, throughSeq: number): boolean {
-        if (!this.shadow) return false;
+    /** #4316 PR3/3, #4911: fork adoption row clone, awaited from the (async)
+     *  fork lane (child keeps the parent's seq values so cloned kernel refs
+     *  keep pointing at the same ledger positions; on network backends this
+     *  twin routes through the backend — see shadow.cloneSessionRowsAsync).
+     *  False when the unified store is unavailable or the clone failed — the
+     *  fork endpoint then proceeds exactly as before (kernel-only clone).
+     *  Never throws. */
+    unifiedCloneSessionRowsAsync(parentId: string, childId: string, throughSeq: number): Promise<boolean> {
+        if (!this.shadow) return Promise.resolve(false);
         try {
-            return this.shadow.cloneSessionRows(parentId, childId, throughSeq);
+            return this.shadow.cloneSessionRowsAsync(parentId, childId, throughSeq);
         } catch {
-            return false;
+            return Promise.resolve(false);
         }
     }
 
