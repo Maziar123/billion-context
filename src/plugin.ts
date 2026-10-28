@@ -70,7 +70,7 @@ import { currentContextObservation, recordContextObservation, settleUsageReport 
 import { billOutputUsage } from "./billing.js";
 import { promptInputTotal, declaredInclusiveFromUsage, type WireProtocol } from "./util.js";
 import { stateDir } from "./paths.js";
-import { lookupToolWitness, recordToolWitness } from "./tool-ring.js";
+import { lookupToolUseIdSession, lookupToolWitness, recordToolUseId, recordToolWitness } from "./tool-ring.js";
 import { awaitDrain } from "./server/stream-io.js";
 import { incomingCoreMessages } from "./fork-adoption.js";
 import { BUILD_COMMIT } from "./version.js";
@@ -1928,6 +1928,19 @@ export async function handlePluginTool(
     // remain authoritative. Id-less calls use a unique witness, then a single
     // fresh conversation, or fail loudly without guessing (#1685).
     const bodyArgs = parsed.args && typeof parsed.args === "object" ? parsed.args as Record<string, unknown> : {};
+    // #4580: Claude Code (≥2.1.308) stamps every MCP tools/call with the
+    // originating tool_use id (the shim reads _meta["claudecode/toolUseId"]
+    // and forwards it as toolCallId). A shared shim's process-wide binding
+    // cannot tell the main thread from its Task subagents — the id can: the
+    // proxy witnessed that exact tool_use in exactly one session's stream,
+    // recorded in the #4580 id ring at settle time. Host-stamped, so a live
+    // mapping outranks both the body id and the witness hash ladder (same
+    // authority class as #2024 native callers). An id the ring does not know
+    // (never streamed here, TTL expiry, proxy restart) changes nothing: the
+    // existing ladder decides, fail-closed semantics untouched.
+    const routedCallId = typeof parsed.toolCallId === "string" ? parsed.toolCallId : "";
+    const toolUseLaneId = routedCallId ? lookupToolUseIdSession(routedCallId) : undefined;
+    const toolUseSession = toolUseLaneId ? peekSession(toolUseLaneId) : undefined;
     // #2024/#2072: true only when the caller PROVES the body id is host-stamped
     // per-call metadata — the MCP shim's _meta.threadId, or a host-native agent's
     // own session-manager id (pi / dsh / opencode). Model-transcribed ids and
@@ -1938,7 +1951,16 @@ export async function handlePluginTool(
     let session: Session | undefined;
     let entry: ConversationEntry | undefined;
     let routedBy: "witness" | "body" | "arb" | "native" = "body";
-    if (conversationId) {
+    if (toolUseSession) {
+        // #4580: the host's own per-call id named this lane. Note it: routing
+        // by call id is new behavior and the log line is the fastest way to
+        // confirm it in the wild (or rule it out).
+        session = toolUseSession;
+        const cid = conversationIdForSession(session.id);
+        entry = cid ? conversations.get(cid) : undefined;
+        routedBy = "native";
+        deps.log("info", `[plugin] tool "${tool}": routed by host call id (#4580) to "${session.id}"`);
+    } else if (conversationId) {
         session = resolveForkConversation(conversationId);
         entry = conversations.get(conversationId);
         if (session && witnessIds.size > 0 && !witnessIds.has(session.id)) {
@@ -2579,6 +2601,10 @@ export async function pipePluginChatWithStrip(
         for (const tc of seenToolCalls.values()) {
             if (tc.name.length === 0) continue;
             recordToolWitness(session.id, tc.name, tc.args);
+            // #4580: the same observation carries the host's tool_use id —
+            // ring it so a later tools/call stamped with that id routes to
+            // THIS lane even when the shared MCP shim is bound elsewhere.
+            if (tc.id.length > 0) recordToolUseId(tc.id, session.id);
         }
     };
     // Degenerate-turn retry (#732/#821 for this pipe). The first attempt's
@@ -3741,9 +3767,14 @@ export async function pipePluginResponsesWithStrip(
     const witnessedCalls = new Map<string, { name: string; args: string; named: boolean }>();
     const settleWitnesses = () => {
         if (!session) return;
-        for (const wc of witnessedCalls.values()) {
+        for (const [itemId, wc] of witnessedCalls) {
             if (!wc.named || wc.name.length === 0) continue;
             recordToolWitness(session.id, wc.name, wc.args);
+            // #4580: the map key is the output item's id (fc_…), i.e. the
+            // host's per-call id — ring it for id-stamped tools/call routing.
+            // Synthetic fallback keys ("oi:<index>") are never host-stamped;
+            // skip them so cross-session index keys can't shadow real ids.
+            if (itemId.length > 0 && !itemId.startsWith("oi:")) recordToolUseId(itemId, session.id);
         }
     };
     let sawReasoning = false;
@@ -4602,6 +4633,9 @@ function recordJsonToolWitnesses(sessionId: string, json: Record<string, unknown
                 if (b["type"] !== "tool_use") continue;
                 if (typeof b["name"] !== "string" || b["name"].length === 0) continue;
                 recordToolWitness(sessionId, b["name"], b["input"] !== null && b["input"] !== undefined ? b["input"] as Record<string, unknown> : "");
+                // #4580: anthropic tool_use ids are the ids Claude Code stamps
+                // on its MCP tools/call — ring them for routing.
+                if (typeof b["id"] === "string" && b["id"].length > 0) recordToolUseId(b["id"], sessionId);
             }
             return;
         }
@@ -4614,6 +4648,9 @@ function recordJsonToolWitnesses(sessionId: string, json: Record<string, unknown
                 if (o["type"] !== "function_call") continue;
                 if (typeof o["name"] !== "string" || o["name"].length === 0) continue;
                 recordToolWitness(sessionId, o["name"], typeof o["arguments"] === "string" ? o["arguments"] : "");
+                // #4580: responses function_call ids double as per-call ids.
+                const rcId = o["call_id"] ?? o["id"];
+                if (typeof rcId === "string" && rcId.length > 0) recordToolUseId(rcId, sessionId);
             }
             return;
         }
@@ -4652,6 +4689,9 @@ function recordJsonToolWitnesses(sessionId: string, json: Record<string, unknown
                 const f = fn as Record<string, unknown>;
                 if (typeof f["name"] !== "string" || f["name"].length === 0) continue;
                 recordToolWitness(sessionId, f["name"], typeof f["arguments"] === "string" ? f["arguments"] : "");
+                // #4580: chat-completions tool_calls ids double as per-call ids.
+                const tcId = (tc as Record<string, unknown>)["id"];
+                if (typeof tcId === "string" && tcId.length > 0) recordToolUseId(tcId, sessionId);
             }
         }
     } catch {
