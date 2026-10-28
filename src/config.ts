@@ -878,10 +878,14 @@ export type ProxyOptions = {
      *  omitted). Opt out for local debugging with env BILI_LOG_MASK_HOSTS=0
      *  or `maskHosts: false` (#897); credential masking stays on either way. */
     maskHosts?: boolean;
-    /** Split Claude Code subagent requests (parent+agent header pair) into
-     *  their own session id so they don't queue on the main session's lock
-     *  (#970, default on). Opt out with env BILI_SUBAGENT_SPLIT=0 or
-     *  `subagentSplit: false` in the config file (env wins). */
+    /** Split Claude Code subagent requests into their own session id so they
+     *  don't queue on the main session's lock (#970, default on). Two
+     *  mechanisms, both gated by this switch: the agent-id header pair split,
+     *  and header-less claude code traffic (VS Code build subagents, #4352)
+     *  routed through the continuity-aware order resolver so a history-
+     *  disjoint ride forks onto its own |sub lane while continuing main
+     *  conversations keep the raw key. Opt out with env BILI_SUBAGENT_SPLIT=0
+     *  or `subagentSplit: false` in the config file (env wins). */
     subagentSplit?: boolean;
     /** Opt-in fork block-adoption (#629, default off). ANONYMOUS clients
      *  (prefix-affinity) that fork their history inherit the parent's

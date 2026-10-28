@@ -97,10 +97,10 @@ import { getStore, setGlobalSessionCommitListener } from "./persist.js";
 import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError, isBenignSocketRaceError, enterSessionContext, muteStderrLeg, onFileLegLive, logTimestamp } from "./logger.js";
 import { queryLogLines } from "./web/logs-query.js";
 import { configFile, defaultLogFile, stateDir } from "./paths.js";
-import { atomicWriteInstanceFile, clearProxyInstanceFile, classifySameLanePeer, entryScriptFingerprint, entryShape, findSameLanePredecessor, findVerifiedSameLaneTwin, isPidAlive, listInstances, probePid, readProxyInstanceFile, registerInstanceAndWarn, sameInstanceShape, unregisterInstance, warnOnNewPeers, writeSpawnPortLog, type InstanceShape, type PidProbe, type ProxyInstanceFile, type RegistryEntry, type SameLanePeer } from "./instance.js";
+import { atomicWriteInstanceFile, clearProxyInstanceFile, classifySameLanePeer, entryScriptFingerprint, entryShape, findSameLanePredecessor, findVerifiedSameLaneTwin, isPidAlive, listInstances, markPortReleased, probePid, readProxyInstanceFile, registerInstanceAndWarn, sameInstanceShape, unregisterInstance, warnOnNewPeers, writeSpawnPortLog, type InstanceShape, type PidProbe, type ProxyInstanceFile, type RegistryEntry, type SameLanePeer } from "./instance.js";
 import { createServedMarkerWriter, reapStaleWriterMarkers, writerMarkerDir, type ServedMarkerWriter } from "./served-markers.js";
 import { recordSplitBrainContest } from "./storage/runtime-status.js";
-import { mayClobberPointer, probeOwnerInfo, resolvePortClaim } from "./port-owner.js";
+import { mayClobberPointer, probeOwnerInfo, resolvePortClaim, verifyEntryOwnsPort } from "./port-owner.js";
 import { hoistTrappedToolItems } from "./tool-pair-order.js";
 import { computeAnthropicMessageMarks, stampAnthropicSystemCacheControl, anthropicToolsCarryCacheControl } from "./loop/cache-control.js";
 import { reconcileSystemAnchor } from "./system-anchor.js";
@@ -1392,72 +1392,113 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
     // Node treats it as an unhandled 'error' and throws, aborting before the
     // graceful-shutdown flush can run. Catch, log a human-readable message,
     // flush sessions, and exit cleanly (exit code 1 so callers/scripts notice).
+    // #4982: the twin verdict needs an async health probe (verifyEntryOwnsPort),
+    // so the handler body runs through a promise. At most one listen attempt is
+    // ever in flight (each retry is scheduled FROM this handler), so two error
+    // handlers can never interleave.
     server.on("error", (err: NodeJS.ErrnoException) => {
-        let busyReason: FailFastReason | undefined;
-        let peer: SameLanePeer | undefined;
-        if (isPortBusyError(err.code, lastTriedPort)) {
-            // #3493: win32 reports a cross-family bind collision (IPv6 wildcard
-            // holder squats the IPv4 bind) as EACCES on an unprivileged port —
-            // classify it like a true EADDRINUSE so it ladders instead of dying
-            // with the misleading privileged-port hint.
-            peer = classifySameLanePeer(listInstances(), lastTriedPort, launcherLane, ownFingerprint, (e) => sameInstanceShape(entryShape(e), ownShape));
-            const action = decideEaddrinuse({
-                upgradeReplacement,
-                twinHolds: peer?.kind === "twin",
-                launchToken: launchToken !== undefined,
-                strictPort,
-                attempts: listenAttempts,
-                maxAttempts: MAX_LISTEN_ATTEMPTS,
-                predecessorTicksLeft,
-                predecessorHolds: sameLanePredecessorHolds(lastTriedPort),
-                lastTriedPort,
-            });
-            if (action.kind === "wait-predecessor") {
-                predecessorTicksLeft -= 1;
-                setTimeout(() => attemptListen(action.port), PREDECESSOR_WAIT_MS);
-                return;
-            }
-            if (action.kind === "ladder") {
-                listenAttempts += 1;
-                // #3801: laddering OFF a same-build same-lane holder means it
-                // drifted (a true twin would have failed fast above) — name
-                // the coexistence so the dual-instance state in the logs is
-                // explainable: both run, each serves its own sessions.
-                const driftNote = peer?.kind === "drifted"
-                    ? ` — held by a same-lane bili instance (pid ${peer.entry.pid}) whose config drifted since it spawned; it keeps serving its own sessions while this one takes the next free port`
-                    : "";
-                log("warn", `port ${lastTriedPort} busy${err.code === "EADDRINUSE" ? "" : ` (${err.code})`} — ${action.nextPort === 0 ? "retrying on an ephemeral port" : `retrying on port ${action.nextPort}`}${driftNote} (#3801)`);
-                attemptListen(action.nextPort);
-                return;
-            }
-            busyReason = action.reason;
-        }
-        const hint =
-            isPortBusyError(err.code, lastTriedPort)
-                ? busyReason === "twin-collision"
-                  ? ` — port ${lastTriedPort} is already served by a same-build bili instance (pid ${peer?.entry.pid}, lane ${launcherLane}) — exiting instead of hopping: the duplicate loses and the serving instance keeps serving; the next launch will attach to it (#3044). A spawner reads this exit as an adopt signal and attaches to the serving instance itself (#3654).`
-                  : busyReason === "upgrade-replacement"
-                    ? ` — this process is an upgrade-restart replacement (#3044): it must own port ${lastTriedPort} exactly, but the prior instance still holds it. Exiting instead of hopping to ${lastTriedPort + 1} — a drifted replacement serves no client and leaks while the prior instance keeps serving; the upgrade retries on the next cooldown cycle.`
-                    : busyReason === "strict-port"
-                      ? ` — port ${lastTriedPort} is pinned (strict-port mode) but already in use. Free it or point the client at another port (e.g. BILI_CLAUDE_NATIVE_PORT for the claude native posture).`
-                      : ` — port ${lastTriedPort} is already in use. Stop the other process or use --port <N>.`
-                : err.code === "EACCES"
-                  ? ` — port ${lastTriedPort} requires privileges. Use a port >= 1024.`
-                  : "";
-        const listenLine = `listen failed: ${err.code ?? ""} ${err.message}${hint}`;
-        log("error", listenLine);
-        // #3654/#3116: a spawner's failure message points users at the per-port
-        // log, but post-#2864 this child mutes its stderr leg into bili.log —
-        // without this line that file stays 0 bytes and the diagnosis dies there.
-        if (launchToken !== undefined) writeSpawnPortLog(opts.port, `${logTimestamp()} [error] [v=${VERSION}] ${listenLine}`);
-        shuttingDown = true;
-        server.close();
-        flushConversations();
-        void flushAllSessions().finally(() => {
-            closeLogger();
-            process.exit(eaddrinuseExitCode(busyReason));
-        });
+        void handleListenError(err);
     });
+    const handleListenError = async (err: NodeJS.ErrnoException): Promise<void> => {
+        try {
+            let busyReason: FailFastReason | undefined;
+            let peer: SameLanePeer | undefined;
+            if (isPortBusyError(err.code, lastTriedPort)) {
+                // #3493: win32 reports a cross-family bind collision (IPv6 wildcard
+                // holder squats the IPv4 bind) as EACCES on an unprivileged port —
+                // classify it like a true EADDRINUSE so it ladders instead of dying
+                // with the misleading privileged-port hint.
+                peer = classifySameLanePeer(listInstances(), lastTriedPort, launcherLane, ownFingerprint, (e) => sameInstanceShape(entryShape(e), ownShape));
+                // #4982: a registry twin is only a twin while it still OWNS the
+                // contended socket. The marker is a claim written at announce time;
+                // by now the claimed owner may have entered graceful shutdown
+                // (listener closed, process still draining) and a DIFFERENT
+                // instance may hold the freed port — dying with the adopt signal
+                // there strands the launch behind a cross-lane stranger we are
+                // forbidden to attach to (#1225). Verify the claim against the live
+                // listener first; an unverified claim falls through to the plain
+                // foreign-holder policy below (ladder or fail-fast).
+                let twinHolds = false;
+                if (peer?.kind === "twin") {
+                    const claimed = peer.entry;
+                    twinHolds = await verifyEntryOwnsPort(claimed.origin, { pid: claimed.pid, instanceId: claimed.instanceId });
+                    if (!twinHolds) {
+                        peer = undefined;
+                        log("warn", `port ${lastTriedPort}: registry twin ${claimed.instanceId.slice(0, 8)} (pid ${claimed.pid}) no longer answers as itself — the socket moved on while it drained; treating the port as foreign-held instead of dying twin-collision (#4982)`);
+                    }
+                }
+                // shutdown() may have raced the probe — its own exit path owns
+                // the outcome from here on.
+                if (shuttingDown) return;
+                const action = decideEaddrinuse({
+                    upgradeReplacement,
+                    twinHolds,
+                    launchToken: launchToken !== undefined,
+                    strictPort,
+                    attempts: listenAttempts,
+                    maxAttempts: MAX_LISTEN_ATTEMPTS,
+                    predecessorTicksLeft,
+                    predecessorHolds: sameLanePredecessorHolds(lastTriedPort),
+                    lastTriedPort,
+                });
+                if (action.kind === "wait-predecessor") {
+                    predecessorTicksLeft -= 1;
+                    setTimeout(() => attemptListen(action.port), PREDECESSOR_WAIT_MS);
+                    return;
+                }
+                if (action.kind === "ladder") {
+                    listenAttempts += 1;
+                    // #3801: laddering OFF a same-build same-lane holder means it
+                    // drifted (a true twin would have failed fast above) — name
+                    // the coexistence so the dual-instance state in the logs is
+                    // explainable: both run, each serves its own sessions.
+                    const driftNote = peer?.kind === "drifted"
+                        ? ` — held by a same-lane bili instance (pid ${peer.entry.pid}) whose config drifted since it spawned; it keeps serving its own sessions while this one takes the next free port`
+                        : "";
+                    log("warn", `port ${lastTriedPort} busy${err.code === "EADDRINUSE" ? "" : ` (${err.code})`} — ${action.nextPort === 0 ? "retrying on an ephemeral port" : `retrying on port ${action.nextPort}`}${driftNote} (#3801)`);
+                    attemptListen(action.nextPort);
+                    return;
+                }
+                busyReason = action.reason;
+            }
+            const hint =
+                isPortBusyError(err.code, lastTriedPort)
+                    ? busyReason === "twin-collision"
+                      ? ` — port ${lastTriedPort} is already served by a same-build bili instance (pid ${peer?.entry.pid}, lane ${launcherLane}) — exiting instead of hopping: the duplicate loses and the serving instance keeps serving; the next launch will attach to it (#3044). A spawner reads this exit as an adopt signal and attaches to the serving instance itself (#3654).`
+                      : busyReason === "upgrade-replacement"
+                        ? ` — this process is an upgrade-restart replacement (#3044): it must own port ${lastTriedPort} exactly, but the prior instance still holds it. Exiting instead of hopping to ${lastTriedPort + 1} — a drifted replacement serves no client and leaks while the prior instance keeps serving; the upgrade retries on the next cooldown cycle.`
+                        : busyReason === "strict-port"
+                          ? ` — port ${lastTriedPort} is pinned (strict-port mode) but already in use. Free it or point the client at another port (e.g. BILI_CLAUDE_NATIVE_PORT for the claude native posture).`
+                          : ` — port ${lastTriedPort} is already in use. Stop the other process or use --port <N>.`
+                    : err.code === "EACCES"
+                      ? ` — port ${lastTriedPort} requires privileges. Use a port >= 1024.`
+                      : "";
+            const listenLine = `listen failed: ${err.code ?? ""} ${err.message}${hint}`;
+            log("error", listenLine);
+            // #3654/#3116: a spawner's failure message points users at the per-port
+            // log, but post-#2864 this child mutes its stderr leg into bili.log —
+            // without this line that file stays 0 bytes and the diagnosis dies there.
+            if (launchToken !== undefined) writeSpawnPortLog(opts.port, `${logTimestamp()} [error] [v=${VERSION}] ${listenLine}`);
+            shuttingDown = true;
+            server.close();
+            flushConversations();
+            void flushAllSessions().finally(() => {
+                closeLogger();
+                process.exit(eaddrinuseExitCode(busyReason));
+            });
+        } catch (e) {
+            // The listen already failed; a crash here must still end the process
+            // cleanly instead of leaving a dead listener running.
+            log("error", `listen-error handling crashed: ${String(e)}`);
+            shuttingDown = true;
+            server.close();
+            flushConversations();
+            void flushAllSessions().finally(() => {
+                closeLogger();
+                process.exit(1);
+            });
+        }
+    };
     // Catch stray rejections/throws from background work (compress loops,
     // auto-update, initSessions) that escape the per-request try/catch —
     // Node 20+ aborts the process on these by default. Log loudly and flush.
@@ -1521,6 +1562,11 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         server.close(() => {
             finishDrain();
         });
+        // #4982: the listener just stopped accepting — withdraw the port
+        // ownership claim NOW instead of at process exit. The drain can outlive
+        // the release by minutes (keep-alive pins), and a stale claim let a
+        // same-lane newcomer misclassify us as its twin and die (#4982).
+        markPortReleased(instanceId);
         // Hard fallback: if connections hang (client never closes), don't
         // block shutdown forever — force-exit after a grace window. #3890:
         // while connections are still ALIVE the window re-arms (bounded by

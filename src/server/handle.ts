@@ -33,7 +33,7 @@ import { enterSessionContext, log as loggerLog } from "../logger.js";
 import { codexCompactGatePre, codexCompactMode, hasCompactionTrigger, isCodexHost, replaceBiliCompactionItems } from "../codex-compact.js";
 import { emitPreflightError } from "../stream-error.js";
 import { agentProviderRecipes } from "../agent-providers.js";
-import { affinityToken, conversationHeaderSource, claudeSubagentAgentId, claudeSubagentSplit, clientConversationHeader, codexTurnIdentity, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity } from "../session-id.js";
+import { affinityToken, claudeAnthropicPersonaOrderApplies, conversationHeaderSource, claudeSubagentAgentId, claudeSubagentSplit, clientConversationHeader, codexTurnIdentity, dshPersonaFingerprintApplies, instructionsFingerprintApplies, openaiSystemTextForPersona, preferPromptCacheKeyIdentity } from "../session-id.js";
 import { personaConversationOrder } from "../session-resolve.js";
 import { prefixAffinity, describeResumeMiss, type AnonymousAffinity } from "../prefix-affinity.js";
 import { buildAnonymousProvenance, type AnonymousProvenance } from "../anon-provenance.js";
@@ -1087,15 +1087,29 @@ async function handleRequest(
                           // semantics): ride the verbatim id — never route
                           // empty-tag traffic through the order resolver
                           // (codex turn-1 shape keys by its session header).
-                          ? (anthropicIdentity?.value ?? anthropicSignal)
-                          : personaConversationOrder(
-                              anthropicIdentity?.value ?? anthropicSignal,
-                              (parsed as AnthropicRequestBody).messages,
-                              personaSystemText,
-                              pluginReportedModel(req.headers),
-                          ))
-                    : anthropicIdentity?.value ?? anthropicSignal)
-            : protocol === "openai"
+                           ? (anthropicIdentity?.value ?? anthropicSignal)
+                           : personaConversationOrder(
+                               anthropicIdentity?.value ?? anthropicSignal,
+                               (parsed as AnthropicRequestBody).messages,
+                               personaSystemText,
+                               pluginReportedModel(req.headers),
+                           ))
+                     : claudeAnthropicPersonaOrderApplies(req.headers) && opts.subagentSplit !== false
+                       && !sideRequestLike && personaSystemText !== ""
+                       // #4352: header-less claude code subagents (VS Code
+                       // build) ride the raw parent id; route them through the
+                       // continuity-aware order resolver so a history-disjoint
+                       // ride forks onto its own |sub:<fp> lane while a
+                       // continuing main conversation keeps the raw key on
+                       // order+content evidence (#2944).
+                       ? personaConversationOrder(
+                           anthropicIdentity?.value ?? anthropicSignal,
+                           (parsed as AnthropicRequestBody).messages,
+                           personaSystemText,
+                           pluginReportedModel(req.headers),
+                         )
+                       : anthropicIdentity?.value ?? anthropicSignal)
+             : protocol === "openai"
               ? (dshPersona && !sideRequestLike && personaSystemText !== ""
                     ? personaConversationOrder(
                           openaiIdentity?.value ?? openaiSignal,

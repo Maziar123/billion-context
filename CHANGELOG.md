@@ -7,7 +7,10 @@ Versions follow the merge of a `*_release-v*` branch; CI publishes to npm on tag
 
 ### Fixed
 - **子会话窗口继承(#4682)**:客户端给闲置复盘回合/子代理自造子会话 id(`<parent>:side:<id>`、`<parent>:side:conversation:<key>`、`<parent>:sub:<id>`),却只按父 uuid 上报 runtime-info;窗口阶梯按字面 id 查不到条目 → 落到注册表 peek,并因请求不带 tier 证据被 #1321 上限压到内置标准 200K。于是上报 1M 的会话把自己的复盘回合按 200K 预算:preflight 把 173K 上下文压向 150K 目标、提交早 SSE 头后客户端放弃,请求以 `not forwarding` 收场。现在精确条目缺失时按已知后缀逐级剥离(最多 4 层)取最近祖先条目,model 必须匹配(子会话换模型仍落空),直击条目永不被父条目覆盖;无新增配置键,阶梯顺序不变。
+- 出站不变量判官新增 I3 配对不变量（#4862 出口校验缺口）：此前判官只对账入站↔出站连续性（I1/I2），折叠区内完全免检，于是「折叠拆断一对 tool_use/tool_result」的出站体拿到 clean fold verdict 直接放行，直到上游用 400 `tool_use ids were found without tool_result blocks` 说出真相。现在每个 tool-call 必须有同 id 的 tool-result 在其后、每个 tool-result 必须有同 id 的 tool-call 在其前，折叠区不再豁免；归因保持“谁的错”职责（宿主自己发来的断对不计 bili、compress 在途调用豁免、id 重铸不可洗白）。纯检测不拦截，受 diagnostics.invariantJudge 旋钮控制。
 - 块区间边界在重存时不再回退:折叠后客户端重发的视图不含已覆盖原文,重入库时该批次无法重新解析区间(-1/-1),旧逻辑会把已解析的真实区间抹掉。现在区间证据一旦解析即持久(入库 `CASE` 保留;sqlite/mysql 双后端),未知块保持诚实缺口(#4608)。
+- 优雅停机(SIGTERM → dispose)的 writer 标记现在记录 `stoppedAt`:重启流程(杀旧进程→立即重绑)不再对已确认死亡的前任实例误报 [split-brain]——30s 新鲜度回退从此只覆盖无法证明死亡的崩溃场景(#3923;release-gate lane A 代理重启时观察到误报)。
+- Claude Code 子代理的 bili 调用不再路由到父会话:Task 子代理与父线程共用一个 MCP shim,启动时抓的绑定只指向父会话;子代理压缩错对象或永久 409。现在 shim 把 host 盖在每次 tools/call 上的 `_meta["claudecode/toolUseId"]` 转发为 body `toolCallId`,代理用它出站时记下的 id→会话映射直接路由到子代理自己的 lane(10 分钟 TTL);id 未知时行为与从前完全一致(#4580)。
 
 ### Added
 
