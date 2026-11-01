@@ -117,6 +117,10 @@ export const LIVE_FILES = [
     // IPC rather than sleeps, and nothing binds a port, so in-file tests are
     // parallel-safe and the suite needs no serialization.
     "tests/snapshot-journal.test.ts",
+    // #5487: spawns a one-shot sealer child (process.execPath) against its own
+    // mkdtemp dir to exercise concurrent sealing; no sockets are bound, so no
+    // zone port band is needed — the entry is for the SPAWN_RE tripwire alone
+    "tests/log-retention.test.ts",
 ];
 
 /** Band width per live file: the zone ladder drifts +1 per EADDRINUSE retry;
