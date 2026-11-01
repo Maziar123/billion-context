@@ -117,12 +117,14 @@ function wrapBetterSqlite3(db: BetterSqlite3Database): SqliteDatabase {
     };
 }
 
-let databaseSyncFactoryForTests: ((path: string) => NodeSqliteDatabase) | null = null;
+export const SQLITE_BUSY_TIMEOUT_MS = 5000;
+
+let databaseSyncFactoryForTests: ((path: string, options?: { timeout: number }) => NodeSqliteDatabase) | null = null;
 
 /** Test seam: substitute how the node:sqlite emulation obtains its database
  *  handle (e.g. an adapter injecting engine-level I/O failures, #4949).
  *  Null = the real builtin node:sqlite module. */
-export function setDatabaseSyncFactoryForTests(factory: ((path: string) => NodeSqliteDatabase) | null): void {
+export function setDatabaseSyncFactoryForTests(factory: ((path: string, options?: { timeout: number }) => NodeSqliteDatabase) | null): void {
     databaseSyncFactoryForTests = factory;
 }
 
@@ -130,14 +132,15 @@ function openNodeSqlite(path: string): SqliteDatabase {
     // node:sqlite is synchronous like better-sqlite3, but has no
     // .transaction() helper — emulate with BEGIN/COMMIT + savepoints for
     // nesting, which is the only behavioral difference the store relies on.
+    const options = { timeout: SQLITE_BUSY_TIMEOUT_MS };
     const db = databaseSyncFactoryForTests
-        ? databaseSyncFactoryForTests(path)
+        ? databaseSyncFactoryForTests(path, options)
         : (() => {
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { DatabaseSync } = require("node:sqlite") as {
-                  DatabaseSync: new (path: string) => NodeSqliteDatabase;
+                  DatabaseSync: new (path: string, options: { timeout: number }) => NodeSqliteDatabase;
               };
-              return new DatabaseSync(path);
+              return new DatabaseSync(path, options);
           })();
     let depth = 0;
     const begin = (readOnly: boolean) => db.exec(depth === 0 ? (readOnly ? "BEGIN DEFERRED" : "BEGIN IMMEDIATE") : `SAVEPOINT sp${depth}`);

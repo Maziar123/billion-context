@@ -88,7 +88,7 @@ export const WAL_JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024;
 export function storagePragmas(walJournalSizeLimitBytes: number): string[] {
     return [
         // Install the busy handler before WAL initialization can acquire locks.
-        "PRAGMA busy_timeout = 5000",
+        `PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`,
         "PRAGMA journal_mode = WAL",
         "PRAGMA synchronous = NORMAL",
         "PRAGMA foreign_keys = ON",
@@ -105,6 +105,7 @@ export const STORAGE_PRAGMAS = storagePragmas(WAL_JOURNAL_SIZE_LIMIT);
 
 import { identityOfStoredContent } from "./identity.js";
 import { log as loggerLog } from "../logger.js";
+import { SQLITE_BUSY_TIMEOUT_MS } from "./driver.js";
 
 const STORAGE_DDL_V1 = `CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
