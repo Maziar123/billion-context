@@ -87,9 +87,10 @@ export const WAL_JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024;
  *  short-lived openers (export fast path) and tests apply. */
 export function storagePragmas(walJournalSizeLimitBytes: number): string[] {
     return [
+        // Install the busy handler before WAL initialization can acquire locks.
+        "PRAGMA busy_timeout = 5000",
         "PRAGMA journal_mode = WAL",
         "PRAGMA synchronous = NORMAL",
-        "PRAGMA busy_timeout = 5000",
         "PRAGMA foreign_keys = ON",
         `PRAGMA journal_size_limit = ${walJournalSizeLimitBytes}`,
         // #3901/#3463: freed pages return to the pool incrementally so an

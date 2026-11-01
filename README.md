@@ -624,11 +624,19 @@ A child session (subagent/fork starting from an empty history) reports its linea
 
 ### Running multiple instances (#3633)
 
-**One conversation belongs to one instance for its whole life.** Fold state,
+**Give each conversation to one writer, and keep it there.** Fold state,
 prefix affinity and the summary budget are keyed to a session id whose home is
-the client's own history — and the session's rows live in that instance's
-`index.db`. There is no shared store between instances: nothing replicates,
-nothing fails over, nothing rehydrates a session onto a different instance.
+the client's own history — and the session's rows live in an `index.db`. bili
+does not enforce that rule with a lease: `(namespace, conversation_id)` is an
+identity map (`ON CONFLICT DO NOTHING`), so two writers on the SAME session
+are detected after the fact as a split-brain contest (#3923), never arbitrated.
+So the rule is an operator requirement, not a guarantee. Across deployment
+replicas there is no shared store: nothing replicates, nothing fails over,
+nothing rehydrates a session onto a different replica. On ONE local filesystem
+the store *can* be shared by several processes (WAL is multi-process safe
+there — see the single-machine case below), which is what makes sibling
+installs work; what it does not give you is replication, failover, or two
+writers on the SAME conversation.
 
 Consequences for anyone tempted to put several instances behind one Service:
 
@@ -641,14 +649,16 @@ Consequences for anyone tempted to put several instances behind one Service:
   (`x-bili-plugin-conversation`, `x-opencode-session-id`, `x-acp-session`, …)
   onto a backend — and the client actually sending one (header-less clients
   get prefix affinity instead, which an L7 proxy cannot hash).
-- **Instance count is volume count.** The state directory is one local
-  directory with SQLite in WAL mode (`busy_timeout=5000`); a coherent shared
-  `-shm` and working byte-range locks across writers require an RWO volume
-  that is never shared. Pointing two instances at the same RWX/NFS path does
-  not give you a shared store — it gives you silent corruption behind a
-  timeout. One RWO volume per instance, `storage.unified` included: "unified"
-  means one store *for that instance* (sessions + CCR + CAS in one
-  `index.db`), not one store for the fleet.
+- **Instance count is volume count for a deployment.** The state directory is
+  one local directory with SQLite in WAL mode (`busy_timeout=5000`); WAL
+  multi-process safety holds on a local filesystem but depends on a coherent
+  `-shm` and working byte-range locks, which an RWX/NFS path does not provide.
+  Pointing two *instances* at the same RWX/NFS path does not give you a shared
+  store — it gives you silent corruption behind a timeout. One RWO volume per
+  instance, `storage.unified` included: "unified" means one store *for that
+  instance* (sessions + CCR + CAS in one `index.db`), not one store for the
+  fleet. Several processes on ONE local disk are a different, supported shape —
+  see the single-machine case below.
 - **The workload that actually scales** is *many independent short-lived
   conversations* — one proxy per client or per lane — not *one long
   conversation load-balanced across proxies*. Long conversations are
