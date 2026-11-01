@@ -97,7 +97,6 @@ import { conflictScanEnabled, isDesignBenign, scanClientPlugins, sniffScanClient
 import { clearConflictEvents, recordConflict, summarizeConflicts } from "./conflict-watch.js";
 import { getStore, setGlobalSessionCommitListener } from "./persist.js";
 import { log as loggerLog, configureLogger, getLogPath, closeLogger, isStreamWriteError, isBenignSocketRaceError, enterSessionContext, muteStderrLeg, onFileLegLive, shouldMuteStderrLegAfterFileLive, logTimestamp } from "./logger.js";
-import { queryLogLines } from "./web/logs-query.js";
 import { configureLogRetention } from "./log-retention.js";
 import { noteRequest } from "./attach-heartbeat.js";
 import { configFile, defaultLogFile, sessionsDir, stateDir } from "./paths.js";
