@@ -30,6 +30,7 @@ billion-context/
 │   │   ├── relay.ts             #   Upstream relay zone: forward() + fake-completion recovery (#1440 P2 cut 4)
 │   │   ├── rejection-diagnostics.ts #   Bounded terminal provider cause from direct or nested aggregate rejections
 │   │   ├── responses-ordering.ts #   #564 Responses assistant-run ordering repair + producer-owned turn-separator provenance (#2627)
+│   │   ├── request-cost.ts       #   Per-request local-cost line + #5408 observation heartbeat + count-triggered large-history advisory (#903/#4528)
 │   │   ├── side-request.ts       #   Tool-surface check for auxiliary side requests
 │   │   └── stream-io.ts          #   Small response-body reader for non-2xx inspection
 │   ├── knobs.ts                  # Single knob resolver: env > config file > default (#2030)
