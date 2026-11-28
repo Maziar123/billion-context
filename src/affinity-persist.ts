@@ -3,7 +3,7 @@ import { prefixAffinity, type AffinitySnapshotEntry, MAX_TRACKED_SESSIONS } from
 import { stateDir } from "./paths.js";
 import { log } from "./logger.js";
 import { openSnapshotJournal } from "./snapshot-journal.js";
-import { persistDebounceMs, persistMaxDelayMs } from "./knobs.js";
+import { persistDebounceMs, persistMaxDelayMs, egressPlaneGateOn } from "./knobs.js";
 import { kvStore } from "./persist.js";
 
 /**
@@ -302,8 +302,11 @@ export async function hydrateAffinityUnified(): Promise<void> {
             if (imported > 0) log("info", `[prefix-affinity] hydrated ${imported} chain(s) from unified storage (kv_store namespace "${AFF_NS}") (#5753)`);
         }
         // One-time migration: file rows missing from the store travel up once.
+        // KDD #25: an egressPlane instance never materializes the (potentially
+        // multi-MB) chain table into kv_store — the legacy file stays a
+        // read-only hydration source; eg persistence is memory-only below.
         const kvIds = new Set(kvEntries.map((e) => e.sessionId));
-        if (!hadRow || fileEntries.some((e) => !kvIds.has(e.sessionId))) {
+        if (!egressPlaneGateOn() && (!hadRow || fileEntries.some((e) => !kvIds.has(e.sessionId)))) {
             await store.setKvAsync(AFF_NS, AFF_KEY, { version: 1, entries: normalizeForWrite(merged.entries) });
             if (!hadRow && merged.entries.length > 0) log("info", `[prefix-affinity] migrated ${merged.entries.length} chain(s) from the legacy JSON file into unified storage`);
         }
@@ -328,6 +331,9 @@ export function _resetAffinityPersistForTest(): void {
  *  trailing debounce quiesces bursts; the #1834 max-delay budget guarantees
  *  the write still lands under sustained traffic (see constants above). */
 export function scheduleAffinityPersist(): void {
+    // KDD #25: egressPlane instances keep the chains memory-only — no kv row,
+    // no legacy file rewrite, so the large chain table cannot resurface on disk.
+    if (egressPlaneGateOn()) return;
     const now = Date.now();
     if (pendingSince === null) pendingSince = now;
     if (timer) clearTimeout(timer);
@@ -356,14 +362,14 @@ export async function flushPrefixAffinity(): Promise<void> {
         clearTimeout(timer);
         timer = null;
     }
+    pendingSince = null;
+    if (egressPlaneGateOn()) return;
     if (kvReady && kvStore() !== null) {
         // Must land even when no mutation waited out its debounce before exit:
         // persistUnifiedNow() is read-modify-write, so running it with nothing
         // changed merely rewrites the identical row (idempotent).
-        pendingSince = null;
         await persistUnifiedNow();
     } else {
-        pendingSince = null;
         writeSnapshotLegacy();
     }
 }
