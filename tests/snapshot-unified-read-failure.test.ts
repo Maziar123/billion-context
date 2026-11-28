@@ -6,29 +6,26 @@ import { after, test } from "node:test";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bili-snapshot-read-"));
 process.env.BILI_STORAGE_UNIFIED = "full";
+// KDD #25 hermeticity: legacy read-failure fallback assertions — pin the plane OFF.
+process.env.BILI_ROLLOUT_EGRESS_PLANE = "0";
 process.env.BILI_SESSIONS_DIR = path.join(root, "sessions");
 process.env.XDG_STATE_HOME = path.join(root, "state");
 process.env.XDG_CACHE_HOME = path.join(root, "cache");
 
 const { getStore, unifiedKvActive } = await import("../src/persist.js");
 const affinity = await import("../src/affinity-persist.js");
-const order = await import("../src/order-persist.js");
 const { prefixAffinity } = await import("../src/prefix-affinity.js");
-const { applyOrderSnapshot, resetSessionOrderForTest } = await import("../src/session-resolve.js");
 
+// 2026-11-23: the second writer (session-order) retired with the
+// trust-stamped-id GA — the skeleton map and its persistence module are gone,
+// so this parameterized suite now runs against the surviving affinity writer.
 const affinityEntry = (sessionId: string) => ({ sessionId, depth: 1, tailHash: "a".repeat(16), itemHashes: ["b".repeat(16)], lastSeen: Date.now() });
-const orderEntry = (id: string) => ({ id, kinds: ["api"], frags: ["fragment"], tagHash: "tag", lastSeen: Date.now() });
 const writers = [
     {
         name: "prefix-affinity", hydrate: affinity.hydrateAffinityUnified, flush: affinity.flushPrefixAffinity,
         reset: affinity._resetAffinityPersistForTest, entry: affinityEntry,
         clear: () => { for (const id of prefixAffinity.trackedSessionIds()) prefixAffinity.forget(id); },
         add: (id: string) => { prefixAffinity.importSnapshot([affinityEntry(id)]); },
-    },
-    {
-        name: "session-order", hydrate: order.hydrateOrderUnified, flush: order.flushOrderSkeletons,
-        reset: order._resetOrderPersistForTest, entry: orderEntry, clear: resetSessionOrderForTest,
-        add: (id: string) => { applyOrderSnapshot([orderEntry(id)]); },
     },
 ];
 const store = getStore();
